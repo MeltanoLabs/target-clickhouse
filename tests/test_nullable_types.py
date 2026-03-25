@@ -2,15 +2,15 @@
 
 import sqlalchemy.types
 from clickhouse_sqlalchemy import types as clickhouse_sqlalchemy_types
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from target_clickhouse.connectors import ClickhouseConnector
 
 
 def _make_connector():
-    """Create a ClickhouseConnector with mocked config."""
+    """Create a ClickhouseConnector without full initialization."""
     connector = ClickhouseConnector.__new__(ClickhouseConnector)
-    connector.config = {}
+    connector._config = {}
     connector.logger = MagicMock()
     return connector
 
