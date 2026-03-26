@@ -128,6 +128,17 @@ class ClickhouseConnector(SQLConnector):
         ):
             sql_type = clickhouse_sqlalchemy_types.Nullable(sql_type)
 
+        # Wrap any type in Nullable if the JSON schema allows null values
+        # and it's not already Nullable and not a primary key.
+        schema_type = jsonschema_type.get("type", [])
+        if (
+            isinstance(schema_type, list)
+            and "null" in schema_type
+            and not is_primary_key
+            and not isinstance(sql_type, clickhouse_sqlalchemy_types.Nullable)
+        ):
+            sql_type = clickhouse_sqlalchemy_types.Nullable(sql_type)
+
         return sql_type
 
     def create_empty_table(
