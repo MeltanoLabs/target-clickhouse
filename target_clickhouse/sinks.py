@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from logging import Logger
 from typing import Any, Iterable
 
@@ -29,6 +30,12 @@ class ClickhouseSink(SQLSink):
     """clickhouse target sink class."""
 
     connector_class = ClickhouseConnector
+
+    # ClickHouse strongly prefers large, infrequent inserts (each insert becomes a
+    # part). Default to a larger batch than the SDK's 10k so the columnar insert path
+    # amortises well and avoids "too many parts". Users can override with the
+    # standard `batch_size_rows` setting.
+    MAX_SIZE_DEFAULT = 50000
 
     @property
     def full_table_name(self) -> str:
@@ -63,9 +70,11 @@ class ClickhouseSink(SQLSink):
     ) -> int | None:
         """Bulk insert records to an existing destination table.
 
-        The default implementation uses a generic SQLAlchemy bulk insert operation.
-        This method may optionally be overridden by developers in order to provide
-        faster, native bulk uploads.
+        For the (default) ``http`` driver this uses ``clickhouse-connect``'s native
+        columnar insert, which is dramatically faster than the generic row-oriented
+        SQLAlchemy path for large datasets (millions–billions of rows) and avoids the
+        per-row bind-parameter overhead. The ``native``/``asynch`` drivers, and the
+        explicit ``sqlalchemy_url`` escape hatch, fall back to the SQLAlchemy path.
 
         Args:
             full_table_name: the target table name.
@@ -74,16 +83,37 @@ class ClickhouseSink(SQLSink):
             records: the input records.
 
         Returns:
-            True if table exists, False if not, None if unsure or undetectable.
+            The number of records inserted, or None if undetectable.
 
         """
-        # Need to convert any records with a dict type to a JSON string.
+        # Materialise once; we iterate the records more than once below.
+        records = list(records)
+
+        # Need to convert any records with a dict/list type to a JSON string.
         for record in records:
             for key, value in record.items():
                 if isinstance(value, (dict, list)):
                     record[key] = json.dumps(value)
 
-        res = super().bulk_insert_records(full_table_name, schema, records)
+        if self._use_clickhouse_connect():
+            try:
+                res = self._bulk_insert_via_clickhouse_connect(
+                    full_table_name,
+                    schema,
+                    records,
+                )
+            except Exception as e:  # noqa: BLE001
+                # The columnar fast path is strict about column names/types. For any
+                # incompatibility (e.g. quoted/camelCase identifiers) fall back to the
+                # proven SQLAlchemy insert so correctness is never compromised.
+                self.logger.warning(
+                    "clickhouse-connect fast insert failed (%s); "
+                    "falling back to the SQLAlchemy insert path.",
+                    e,
+                )
+                res = super().bulk_insert_records(full_table_name, schema, records)
+        else:
+            res = super().bulk_insert_records(full_table_name, schema, records)
 
         if self.config.get("optimize_after", False):
             with self.connector._connect() as conn, conn.begin():  # noqa: SLF001
@@ -91,6 +121,99 @@ class ClickhouseSink(SQLSink):
                 conn.execute(sqlalchemy.text(f"OPTIMIZE TABLE {self.full_table_name}"))
 
         return res
+
+    def _use_clickhouse_connect(self) -> bool:
+        """Whether to use the fast clickhouse-connect columnar insert path."""
+        # clickhouse-connect speaks the HTTP protocol; only use it for the http
+        # driver and when the user has not pinned an explicit sqlalchemy_url.
+        return (
+            self.config.get("driver", "http") == "http"
+            and not self.config.get("sqlalchemy_url")
+        )
+
+    @property
+    def _clickhouse_connect_client(self):  # noqa: ANN202
+        """Lazily build and cache a clickhouse-connect client from config."""
+        client = getattr(self, "_ch_connect_client", None)
+        if client is not None:
+            return client
+
+        import clickhouse_connect
+
+        client = clickhouse_connect.get_client(
+            host=self.config["host"],
+            port=self.config["port"],
+            username=self.config["username"],
+            password=self.config.get("password") or "",
+            database=self.config["database"],
+            secure=self.config.get("secure", False),
+            verify=self.config.get("verify", True),
+        )
+        self._ch_connect_client = client
+        return client
+
+    @staticmethod
+    def _split_database_table(full_table_name: str) -> tuple[str | None, str]:
+        """Split ``db.table`` (with optional backticks) into (database, table)."""
+        parts = [p.strip().strip("`") for p in full_table_name.split(".")]
+        if len(parts) == 2:  # noqa: PLR2004
+            return parts[0], parts[1]
+        return None, parts[-1]
+
+    def _bulk_insert_via_clickhouse_connect(
+        self,
+        full_table_name: str,
+        schema: dict,
+        records: list[dict[str, Any]],
+    ) -> int:
+        """Insert records using clickhouse-connect's columnar insert over HTTP.
+
+        Data is sent column-oriented (``column_oriented=True``), which is the fastest
+        path for clickhouse-connect — it matches ClickHouse's native columnar wire
+        format and avoids a server-side row→column transpose.
+
+        Column names and record keys are conformed with the SDK's name-conforming
+        rules (``conform_schema``/``conform_record``) so they match the table columns
+        the connector actually created (e.g. camelCase ``Id`` → ``id``).
+        """
+        if not records:
+            return 0
+
+        column_names = list(self.conform_schema(schema)["properties"].keys())
+        conformed_records = [self.conform_record(record) for record in records]
+        # Build column-major data: one list per column, in schema order.
+        column_data = [
+            [record.get(column) for record in conformed_records]
+            for column in column_names
+        ]
+
+        database, table = self._split_database_table(full_table_name)
+
+        settings: dict[str, Any] = {}
+        if self.config.get("async_insert", False):
+            # Buffer inserts server-side and coalesce into larger parts — recommended
+            # for high-frequency/large-volume ingestion to reduce part churn.
+            settings["async_insert"] = 1
+            settings["wait_for_async_insert"] = 1
+
+        self._clickhouse_connect_client.insert(
+            table=table,
+            data=column_data,
+            column_names=column_names,
+            database=database,
+            column_oriented=True,
+            settings=settings or None,
+        )
+        return len(records)
+
+    def clean_up(self) -> None:
+        """Close the clickhouse-connect client (if opened) at end of stream."""
+        client = getattr(self, "_ch_connect_client", None)
+        if client is not None:
+            with contextlib.suppress(Exception):
+                client.close()
+            self._ch_connect_client = None
+        super().clean_up()
 
     def activate_version(self, new_version: int) -> None:
         """Bump the active version of the target table.

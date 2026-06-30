@@ -139,6 +139,16 @@ class TargetClickhouse(SQLTarget):
                         "table engine removes duplicate rows.",
         ),
         th.Property(
+            "async_insert",
+            th.BooleanType,
+            required=False,
+            default=False,
+            description="Enable ClickHouse server-side async inserts for the "
+                        "(default) http driver. Coalesces inserts into larger parts "
+                        "to reduce part churn on high-volume ingestion. The target "
+                        "waits for the async insert to flush before reporting success.",
+        ),
+        th.Property(
             "order_by_keys",
             th.ArrayType(th.StringType),
             required=False,
