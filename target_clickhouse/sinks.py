@@ -6,10 +6,12 @@ import contextlib
 from logging import Logger
 from typing import Any, Iterable
 
+import backoff
 import jsonschema.exceptions as jsonschema_exceptions
 import simplejson as json
 import sqlalchemy
 from pendulum import now
+from requests.exceptions import ConnectionError as RequestsConnectionError
 from singer_sdk.helpers._compat import (
     date_fromisoformat,
     datetime_fromisoformat,
@@ -25,6 +27,14 @@ from sqlalchemy.sql.expression import bindparam
 
 from target_clickhouse.connectors import ClickhouseConnector
 
+# Retried on the native insert path -- deliberately narrow. requests.ConnectionError
+# (and its ConnectTimeout subclass) fire when the TCP connection itself couldn't be
+# established, i.e. before any data was sent, so a retry can never duplicate rows.
+# Excludes ReadTimeout/HTTPError and everything else: those can happen *after* the
+# server started receiving the batch, where a blind retry risks inserting it twice
+# (ClickHouse has no transactions to roll back a partially-received insert).
+RETRYABLE_INSERT_EXCEPTIONS = (RequestsConnectionError,)
+
 
 class ClickhouseSink(SQLSink):
     """clickhouse target sink class."""
@@ -36,6 +46,46 @@ class ClickhouseSink(SQLSink):
     # amortises well and avoids "too many parts". Users can override with the
     # standard `batch_size_rows` setting.
     MAX_SIZE_DEFAULT = 50000
+
+    # Row-count batching alone can't bound a batch's memory/payload footprint --
+    # a stream of unusually wide records (large JSON blobs, long strings) can
+    # blow past available memory or a reasonable HTTP payload size long before
+    # MAX_SIZE_DEFAULT rows accumulate. This is a safety net alongside the
+    # row-count cap, not a replacement for it. Override with the
+    # `max_batch_bytes` setting.
+    MAX_BATCH_BYTES_DEFAULT = 70_000_000
+
+    @property
+    def _max_batch_bytes(self) -> int:
+        return self.config.get("max_batch_bytes", self.MAX_BATCH_BYTES_DEFAULT)
+
+    @property
+    def is_full(self) -> bool:
+        """Whether the current batch is full by row count or accumulated byte size."""
+        return super().is_full or self._batch_bytes >= self._max_batch_bytes
+
+    def process_record(self, record: dict, context: dict) -> None:
+        """Stage the record for batch processing, tracking its serialized size.
+
+        Args:
+            record: Individual record in the stream.
+            context: Stream partition or context dictionary.
+
+        """
+        # Records reaching process_record() may still contain raw, not-yet-normalized
+        # values (e.g. datetime.date) that plain json.dumps() can't serialize -- that
+        # normalization happens later in the pipeline. This is only a size estimate,
+        # so default=str keeps it robust: every value gets *some* string form, close
+        # enough in length to its eventual serialized size, and it never raises.
+        self._batch_bytes = getattr(self, "_batch_bytes", 0) + len(
+            json.dumps(record, default=str),
+        )
+        super().process_record(record, context)
+
+    def mark_drained(self) -> None:
+        """Reset `records_to_drain` and the byte-size tally for the next batch."""
+        super().mark_drained()
+        self._batch_bytes = 0
 
     @property
     def full_table_name(self) -> str:
@@ -97,15 +147,16 @@ class ClickhouseSink(SQLSink):
 
         if self._use_clickhouse_connect():
             try:
-                res = self._bulk_insert_via_clickhouse_connect(
+                res = self._bulk_insert_via_clickhouse_connect_with_retry(
                     full_table_name,
                     schema,
                     records,
                 )
             except Exception as e:  # noqa: BLE001
                 # The columnar fast path is strict about column names/types. For any
-                # incompatibility (e.g. quoted/camelCase identifiers) fall back to the
-                # proven SQLAlchemy insert so correctness is never compromised.
+                # incompatibility (e.g. quoted/camelCase identifiers) -- or a
+                # connection failure that outlasted the retries above -- fall back to
+                # the proven SQLAlchemy insert so correctness is never compromised.
                 self.logger.warning(
                     "clickhouse-connect fast insert failed (%s); "
                     "falling back to the SQLAlchemy insert path.",
@@ -169,6 +220,33 @@ class ClickhouseSink(SQLSink):
         if len(parts) == 2:  # noqa: PLR2004
             return parts[0], parts[1]
         return None, parts[-1]
+
+    def _bulk_insert_via_clickhouse_connect_with_retry(
+        self,
+        full_table_name: str,
+        schema: dict,
+        records: list[dict[str, Any]],
+    ) -> int | None:
+        """Retry the native insert on connection-establishment failures.
+
+        See RETRYABLE_INSERT_EXCEPTIONS for why only that narrow class is
+        retried here -- anything else re-raises immediately so the caller's
+        existing fallback-to-SQLAlchemy behavior is unchanged.
+        """
+
+        @backoff.on_exception(
+            backoff.expo,
+            RETRYABLE_INSERT_EXCEPTIONS,
+            max_tries=lambda: self.config.get("insert_retry_max_tries", 3),
+            max_value=30,
+            logger=self.logger,
+        )
+        def _attempt() -> int | None:
+            return self._bulk_insert_via_clickhouse_connect(
+                full_table_name, schema, records,
+            )
+
+        return _attempt()
 
     def _bulk_insert_via_clickhouse_connect(
         self,

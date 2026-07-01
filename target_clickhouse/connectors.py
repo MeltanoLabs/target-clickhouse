@@ -24,6 +24,36 @@ if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
 
 
+class ClickHouseJSON(sqlalchemy.types.UserDefinedType):
+    """ClickHouse's native ``JSON`` column type.
+
+    clickhouse_sqlalchemy has no built-in JSON type (unlike Array/Tuple/Map,
+    which it does define). UserDefinedType.get_col_spec() is SQLAlchemy's
+    standard, dialect-agnostic hook for "just emit this literal DDL string",
+    avoiding the need to register a dialect-specific type-compiler visitor for
+    a single type.
+
+    Only stabilized in ClickHouse 24.8+; older servers (e.g. this connector's
+    own CI, pinned to 23.4) reject it outright unless the deprecated
+    `allow_experimental_object_type` setting is set -- which enables a
+    different, older `Object('json')` type, not this one. That's why this
+    type is only ever used when the user opts in via `enable_json`, never by
+    default.
+    """
+
+    def get_col_spec(self, **kw: Any) -> str:  # noqa: ARG002
+        """Return the literal DDL type name.
+
+        Args:
+            kw: Unused; required by the UserDefinedType interface.
+
+        Returns:
+            The ClickHouse column type string.
+
+        """
+        return "JSON"
+
+
 class ClickhouseConnector(SQLConnector):
     """Clickhouse Meltano Connector.
 
@@ -139,9 +169,21 @@ class ClickhouseConnector(SQLConnector):
         sql_type = th.to_sql_type(jsonschema_type)
         is_primary_key = kwargs.get("is_primary_key", False)
 
+        # th.to_sql_type() already resolved "object" schemas to a generic VARCHAR
+        # (indistinguishable at this point from a genuine string property), so
+        # object detection has to look at the original JSON Schema type, not
+        # sql_type. Opt-in only (enable_json): ClickHouse's JSON type only
+        # stabilized in 24.8+, and this connector's own CI target (23.4) rejects
+        # it outright, so it must never be the default.
+        schema_type_raw = jsonschema_type.get("type", [])
+        is_object_schema = "object" in (
+            schema_type_raw if isinstance(schema_type_raw, list) else [schema_type_raw]
+        )
+        if is_object_schema and self.config.get("enable_json", False):
+            sql_type = typing.cast(sqlalchemy.types.TypeEngine, ClickHouseJSON())
         # Clickhouse does not support the DECIMAL type without providing precision,
         # so we need to use the FLOAT type.
-        if type(sql_type) == sqlalchemy.types.DECIMAL:
+        elif type(sql_type) == sqlalchemy.types.DECIMAL:
             sql_type = typing.cast(
                 sqlalchemy.types.TypeEngine,
                 sqlalchemy.types.FLOAT(),

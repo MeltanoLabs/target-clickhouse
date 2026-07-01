@@ -211,6 +211,45 @@ class TargetClickhouse(SQLTarget):
             description="List of columns to order by. Used for engines that require "
                         "ordering.",
         ),
+        th.Property(
+            "insert_retry_max_tries",
+            th.IntegerType,
+            required=False,
+            default=3,
+            description="Max attempts for the native (http driver) bulk insert when "
+                        "the connection to ClickHouse cannot be established (DNS "
+                        "failure, connection refused, connect timeout). Uses "
+                        "exponential backoff between attempts. Only retries "
+                        "connection-establishment failures, where no data could "
+                        "have been sent yet -- a timeout or error response after the "
+                        "server started receiving the batch is not retried here, to "
+                        "avoid risking a duplicate insert (ClickHouse has no "
+                        "transactions to roll back a partial one). Set to 1 to "
+                        "disable retries.",
+        ),
+        th.Property(
+            "max_batch_bytes",
+            th.IntegerType,
+            required=False,
+            default=70_000_000,
+            description="Flush the current batch once its accumulated (approximate, "
+                        "serialized) record size reaches this many bytes, even if "
+                        "batch_size_rows hasn't been reached yet. A safety net "
+                        "alongside row-count batching for streams with unusually "
+                        "wide records (large JSON blobs, long strings).",
+        ),
+        th.Property(
+            "enable_json",
+            th.BooleanType,
+            required=False,
+            default=False,
+            description="Use ClickHouse's native JSON column type for object-typed "
+                        "properties, instead of storing them as a JSON-encoded "
+                        "string. Requires ClickHouse 24.8 or later -- the JSON type "
+                        "only stabilized there, and older servers reject it "
+                        "outright. Leave disabled (default) unless you've confirmed "
+                        "your ClickHouse server version supports it.",
+        ),
     ).to_dict()
 
     default_sink_class = ClickhouseSink
