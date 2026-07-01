@@ -140,9 +140,19 @@ class ClickhouseSink(SQLSink):
 
         import clickhouse_connect
 
+        # Route through the connector's tunnel-aware host/port -- this is the
+        # native bulk-insert path (the connector's whole reason for existing),
+        # so it must respect ssh_tunnel.enable the same way the SQLAlchemy/DDL
+        # path (self.connector._connect()) already does. Using the connector's
+        # own helper (rather than duplicating tunnel-start logic here) also
+        # means both paths share the *same* tunnel instance -- the connector
+        # is a singleton for the sync's lifetime, so this returns the tunnel
+        # already started by whichever path ran first.
+        host, port = self.connector._tunneled_host_port(self.config)  # noqa: SLF001
+
         client = clickhouse_connect.get_client(
-            host=self.config["host"],
-            port=self.config["port"],
+            host=host,
+            port=port,
             username=self.config["username"],
             password=self.config.get("password") or "",
             database=self.config["database"],
