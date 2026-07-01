@@ -72,7 +72,7 @@ class ClickhouseSink(SQLSink):
 
         For the (default) ``http`` driver this uses ``clickhouse-connect``'s native
         columnar insert, which is dramatically faster than the generic row-oriented
-        SQLAlchemy path for large datasets (millions–billions of rows) and avoids the
+        SQLAlchemy path for large datasets (millions-billions of rows) and avoids the
         per-row bind-parameter overhead. The ``native``/``asynch`` drivers, and the
         explicit ``sqlalchemy_url`` escape hatch, fall back to the SQLAlchemy path.
 
@@ -132,7 +132,7 @@ class ClickhouseSink(SQLSink):
         )
 
     @property
-    def _clickhouse_connect_client(self):  # noqa: ANN202
+    def _clickhouse_connect_client(self):
         """Lazily build and cache a clickhouse-connect client from config."""
         client = getattr(self, "_ch_connect_client", None)
         if client is not None:
