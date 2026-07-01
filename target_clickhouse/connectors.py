@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import atexit
 import contextlib
+import signal
 import typing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import sqlalchemy.types
 from clickhouse_sqlalchemy import (
@@ -16,6 +18,7 @@ from singer_sdk.connectors import SQLConnector
 from sqlalchemy import Column, MetaData, create_engine
 
 from target_clickhouse.engine_class import SupportedEngines, create_engine_wrapper
+from target_clickhouse.ssh_tunnel import SSHTunnelForwarder, start_tunnel_if_enabled
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -34,6 +37,43 @@ class ClickhouseConnector(SQLConnector):
     allow_merge_upsert: bool = False  # Whether MERGE UPSERT is supported.
     allow_temp_tables: bool = True  # Whether temp tables are supported.
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize the connector, tracking any SSH tunnel it starts."""
+        super().__init__(*args, **kwargs)
+        self._ssh_tunnel: SSHTunnelForwarder | None = None
+
+    def _tunneled_host_port(self, config: dict) -> tuple[str, int]:
+        """Return the (host, port) to connect to, starting an SSH tunnel if configured.
+
+        The connector is a singleton reused for the life of the sync, so the
+        tunnel (if any) is started once on first use and cached on `self`.
+
+        Args:
+            config: The configuration for the connector.
+
+        Returns:
+            The (host, port) to use, transformed to the tunnel's local bind
+            address if `ssh_tunnel.enable` is set, otherwise the config's own
+            `host`/`port` unchanged.
+
+        """
+        if self._ssh_tunnel is None and (config.get("ssh_tunnel") or {}).get("enable"):
+            self._ssh_tunnel = start_tunnel_if_enabled(config)
+            # Clean up on process exit/signal, mirroring tap-postgres.
+            atexit.register(self._stop_ssh_tunnel)
+            signal.signal(signal.SIGTERM, lambda *_: self._stop_ssh_tunnel())
+            signal.signal(signal.SIGINT, lambda *_: self._stop_ssh_tunnel())
+
+        if self._ssh_tunnel is not None:
+            return self._ssh_tunnel.local_bind_host, self._ssh_tunnel.local_bind_port
+
+        return config["host"], config["port"]
+
+    def _stop_ssh_tunnel(self) -> None:
+        """Stop the SSH tunnel, if one was started."""
+        if self._ssh_tunnel is not None:
+            self._ssh_tunnel.stop()
+
     def get_sqlalchemy_url(self, config: dict) -> str:
         """Generates a SQLAlchemy URL for clickhouse.
 
@@ -43,6 +83,8 @@ class ClickhouseConnector(SQLConnector):
         """
         if config.get("sqlalchemy_url"):
             return super().get_sqlalchemy_url(config)
+
+        host, port = self._tunneled_host_port(config)
 
         if config["driver"] == "http":
             if config["secure"]:
@@ -59,7 +101,7 @@ class ClickhouseConnector(SQLConnector):
             secure_options = f"secure={config['secure']}&verify={config['verify']}"
         return (
             f"clickhouse+{config['driver']}://{config['username']}:{config['password']}@"
-            f"{config['host']}:{config['port']}/"
+            f"{host}:{port}/"
             f"{config['database']}?{secure_options}"
         )
 
