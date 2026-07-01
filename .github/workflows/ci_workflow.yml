@@ -8,7 +8,9 @@ jobs:
     strategy:
       matrix:
         # Only lint using the primary version used for dev
-        python-version: [3.10]
+        # Must be quoted -- unquoted 3.10 is parsed as the YAML float 3.1
+        # (trailing zero dropped), which setup-python then can't find.
+        python-version: ["3.10"]
     steps:
     - uses: actions/checkout@v3
     - name: Set up Python '${{ matrix.python-version }}'
