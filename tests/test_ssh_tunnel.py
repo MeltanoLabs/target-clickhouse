@@ -27,12 +27,15 @@ To provision locally (mirrors the isolation used to validate this feature):
 
 from __future__ import annotations
 
+import io
+import json
 import os
 from pathlib import Path
 
 import pytest
 
 from target_clickhouse.connectors import ClickhouseConnector
+from target_clickhouse.target import TargetClickhouse
 
 SSH_KEY_PATH = os.environ.get("TARGET_CLICKHOUSE_SSH_TEST_KEY")
 BASTION_HOST = os.environ.get("TARGET_CLICKHOUSE_SSH_TEST_BASTION_HOST", "localhost")
@@ -109,6 +112,64 @@ def test_create_table_and_insert_through_tunnel() -> None:
             conn.commit()
     finally:
         connector._stop_ssh_tunnel()  # noqa: SLF001
+
+
+def test_bulk_insert_through_tunnel() -> None:
+    """The native bulk-insert path (not just DDL) respects ssh_tunnel.enable.
+
+    Regression test: bulk_insert_records built its own clickhouse-connect
+    client straight from config["host"]/config["port"], bypassing the
+    connector's tunnel entirely -- so DDL/schema operations (routed through
+    the SQLAlchemy connector) worked over the tunnel, but the actual data
+    load (the connector's primary, "5-7x faster" native insert path,
+    default for the http driver) did not. This runs a real target through
+    its normal listen() entrypoint (the same code path `meltano run` uses)
+    against the network-isolated ClickHouse and confirms rows actually land.
+    """
+    schema_msg = {
+        "type": "SCHEMA",
+        "stream": "ssh_tunnel_bulk_test",
+        "schema": {
+            "properties": {"id": {"type": "integer"}, "name": {"type": "string"}},
+        },
+        "key_properties": ["id"],
+    }
+    record_msgs = [
+        {
+            "type": "RECORD",
+            "stream": "ssh_tunnel_bulk_test",
+            "record": {"id": i, "name": f"row-{i}"},
+        }
+        for i in range(1, 6)
+    ]
+    state_msg = {"type": "STATE", "value": {}}
+    lines = [
+        json.dumps(schema_msg),
+        *[json.dumps(r) for r in record_msgs],
+        json.dumps(state_msg),
+    ]
+
+    target = TargetClickhouse(config=_config())
+    try:
+        target.listen(io.StringIO("\n".join(lines) + "\n"))
+
+        connector = ClickhouseConnector(config=_config())
+        try:
+            engine = connector.create_engine()
+            with engine.connect() as conn:
+                result = conn.exec_driver_sql(
+                    "SELECT count() FROM ssh_tunnel_bulk_test",
+                )
+                assert result.fetchone() == (5,)
+                conn.exec_driver_sql("DROP TABLE ssh_tunnel_bulk_test")
+                conn.commit()
+        finally:
+            connector._stop_ssh_tunnel()  # noqa: SLF001
+    finally:
+        for sink in target._sinks_active.values():  # noqa: SLF001
+            connector_obj = getattr(sink, "connector", None)
+            if connector_obj is not None:
+                connector_obj._stop_ssh_tunnel()  # noqa: SLF001
 
 
 def test_tunnel_reused_across_multiple_connections() -> None:
