@@ -117,13 +117,24 @@ class ClickhouseConnector(SQLConnector):
 
         host, port = self._tunneled_host_port(config)
 
+        # clickhouse_sqlalchemy's HTTP driver only special-cases the literal string
+        # "False"/"false" for `verify` (clickhouse_sqlalchemy/drivers/http/base.py) --
+        # anything else, including the string "True", is forwarded to `requests`
+        # verbatim. `requests` only treats `verify` as "use the default CA bundle"
+        # when it *is* the `True` singleton (an `is not True` identity check); any
+        # other value is treated as a literal path to a CA bundle file, so a
+        # stringified "True" crashes with "Could not find a suitable TLS CA
+        # certificate bundle, invalid path: True" -- verified against a real TLS
+        # ClickHouse endpoint. So verify=True must be conveyed by *omitting* the
+        # query param (letting the driver's own real-bool default apply), never by
+        # sending the string "True".
         query: dict[str, str] = {}
         if config["driver"] == "http":
             if config["secure"]:
                 query["protocol"] = "https"
-                query["verify"] = str(config["verify"])
 
                 if not config["verify"]:
+                    query["verify"] = "False"
                     # disable urllib3 warning
                     import urllib3
 
@@ -132,7 +143,8 @@ class ClickhouseConnector(SQLConnector):
                 query["protocol"] = "http"
         else:
             query["secure"] = str(config["secure"])
-            query["verify"] = str(config["verify"])
+            if not config["verify"]:
+                query["verify"] = "False"
 
         # Built via URL.create (not an f-string) so username/password/database are
         # properly percent-encoded. A raw password containing "@", ":", or "/"
