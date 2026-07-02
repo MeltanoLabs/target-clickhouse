@@ -16,6 +16,7 @@ from clickhouse_sqlalchemy import (
 from singer_sdk import typing as th
 from singer_sdk.connectors import SQLConnector
 from sqlalchemy import Column, MetaData, create_engine
+from sqlalchemy.engine import URL
 
 from target_clickhouse.engine_class import SupportedEngines, create_engine_wrapper
 from target_clickhouse.ssh_tunnel import SSHTunnelForwarder, start_tunnel_if_enabled
@@ -116,9 +117,11 @@ class ClickhouseConnector(SQLConnector):
 
         host, port = self._tunneled_host_port(config)
 
+        query: dict[str, str] = {}
         if config["driver"] == "http":
             if config["secure"]:
-                secure_options = f"protocol=https&verify={config['verify']}"
+                query["protocol"] = "https"
+                query["verify"] = str(config["verify"])
 
                 if not config["verify"]:
                     # disable urllib3 warning
@@ -126,14 +129,24 @@ class ClickhouseConnector(SQLConnector):
 
                     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             else:
-                secure_options = "protocol=http"
+                query["protocol"] = "http"
         else:
-            secure_options = f"secure={config['secure']}&verify={config['verify']}"
-        return (
-            f"clickhouse+{config['driver']}://{config['username']}:{config['password']}@"
-            f"{host}:{port}/"
-            f"{config['database']}?{secure_options}"
-        )
+            query["secure"] = str(config["secure"])
+            query["verify"] = str(config["verify"])
+
+        # Built via URL.create (not an f-string) so username/password/database are
+        # properly percent-encoded. A raw password containing "@", ":", or "/"
+        # would otherwise be misparsed as URL delimiters, breaking the connection
+        # string before any connection is attempted.
+        return URL.create(
+            drivername=f"clickhouse+{config['driver']}",
+            username=config["username"],
+            password=config["password"],
+            host=host,
+            port=port,
+            database=config["database"],
+            query=query,
+        ).render_as_string(hide_password=False)
 
     def create_engine(self) -> Engine:
         """Create a SQLAlchemy engine for clickhouse."""
@@ -400,15 +413,19 @@ class ClickhouseConnector(SQLConnector):
             A sqlalchemy DDL instance.
 
         """
+        # column_name comes from the stream's schema (user-controlled), so it must
+        # be dialect-quoted -- otherwise a column named a ClickHouse reserved word
+        # (e.g. "order") produces invalid SQL. get_column_add_ddl avoids this by
+        # going through sqlalchemy.Column/CreateColumn, which quote internally;
+        # this method builds the DDL string directly, so it must quote explicitly.
+        quoted_column_name = self._dialect.identifier_preparer.quote(column_name)
         if self.config.get("cluster_name"):
             return sqlalchemy.DDL(
-                (
-                    "ALTER TABLE %(table_name)s ON CLUSTER %(cluster_name)s "
-                    "MODIFY COLUMN %(column_name)s %(column_type)s",
-                ),
+                "ALTER TABLE %(table_name)s ON CLUSTER %(cluster_name)s "
+                "MODIFY COLUMN %(column_name)s %(column_type)s",
                 {
                     "table_name": table_name,
-                    "column_name": column_name,
+                    "column_name": quoted_column_name,
                     "column_type": column_type,
                     "cluster_name": self.config.get("cluster_name"),
                 },
@@ -417,7 +434,7 @@ class ClickhouseConnector(SQLConnector):
             "ALTER TABLE %(table_name)s MODIFY COLUMN %(column_name)s %(column_type)s",
             {
                 "table_name": table_name,
-                "column_name": column_name,
+                "column_name": quoted_column_name,
                 "column_type": column_type,
             },
         )
