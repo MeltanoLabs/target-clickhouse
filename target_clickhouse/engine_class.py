@@ -1,9 +1,12 @@
+import logging
 from enum import Enum
 from string import Template
 from typing import List, Optional
 
 from clickhouse_sqlalchemy import engines
 from sqlalchemy import func
+
+logger = logging.getLogger(__name__)
 
 
 class SupportedEngines(str, Enum):
@@ -33,6 +36,27 @@ ENGINE_MAPPING = {
 }
 
 
+# Engines that collapse rows sharing the sorting key (ORDER BY), mapped to a
+# non-collapsing equivalent. A stream with no primary key is created with
+# ORDER BY tuple() — an empty sorting key — so under any of these engines every
+# row shares the same key and a background merge / OPTIMIZE FINAL would reduce
+# the whole table to a single row. See create_engine_wrapper for the fallback.
+COLLAPSING_ENGINE_FALLBACK = {
+    SupportedEngines.REPLACING_MERGE_TREE: SupportedEngines.MERGE_TREE,
+    SupportedEngines.SUMMING_MERGE_TREE: SupportedEngines.MERGE_TREE,
+    SupportedEngines.AGGREGATING_MERGE_TREE: SupportedEngines.MERGE_TREE,
+    SupportedEngines.REPLICATED_REPLACING_MERGE_TREE: (
+        SupportedEngines.REPLICATED_MERGE_TREE
+    ),
+    SupportedEngines.REPLICATED_SUMMING_MERGE_TREE: (
+        SupportedEngines.REPLICATED_MERGE_TREE
+    ),
+    SupportedEngines.REPLICATED_AGGREGATING_MERGE_TREE: (
+        SupportedEngines.REPLICATED_MERGE_TREE
+    ),
+}
+
+
 def is_supported_engine(engine_type):
     return engine_type in SupportedEngines.__members__.values()
 
@@ -52,6 +76,22 @@ def create_engine_wrapper(
     if is_supported_engine(engine_type) is False:
         msg = f"Engine type {engine_type} is not supported."
         raise ValueError(msg)
+
+    # A stream with no primary key is created with ORDER BY tuple() (an empty
+    # sorting key). Under a collapsing engine (ReplacingMergeTree and friends)
+    # every row then shares the same key, so a background merge / OPTIMIZE FINAL
+    # would reduce the entire table to a single row. Fall back to a
+    # non-collapsing engine so keyless streams append instead of collapsing.
+    if len(primary_keys) == 0 and engine_type in COLLAPSING_ENGINE_FALLBACK:
+        safe_engine_type = COLLAPSING_ENGINE_FALLBACK[engine_type]
+        logger.info(
+            "Stream '%s' has no primary key; using engine %s instead of %s to "
+            "avoid collapsing all rows under an empty sorting key.",
+            table_name,
+            safe_engine_type.value,
+            SupportedEngines(engine_type).value,
+        )
+        engine_type = safe_engine_type
 
     engine_args: dict = {}
     if len(primary_keys) > 0:
@@ -86,6 +126,6 @@ def create_engine_wrapper(
                 msg = "Replica name (replica_name) is not defined."
                 raise ValueError(msg)
 
-        engine_class = get_engine_class(engine_type)
+    engine_class = get_engine_class(engine_type)
 
     return engine_class(**engine_args)
