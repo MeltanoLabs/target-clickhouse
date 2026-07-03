@@ -104,27 +104,26 @@ def create_engine_wrapper(
     if order_by_keys is not None:
         engine_args["order_by"] = order_by_keys
 
-    if config is not None:
-        if engine_type in (
-            SupportedEngines.REPLICATED_MERGE_TREE,
-            SupportedEngines.REPLICATED_REPLACING_MERGE_TREE,
-            SupportedEngines.REPLICATED_SUMMING_MERGE_TREE,
-            SupportedEngines.REPLICATED_AGGREGATING_MERGE_TREE,
-        ):
-            table_path: Optional[str] = config.get("table_path")
-            if table_path is not None:
-                if "$" in table_path:
-                    table_path = Template(table_path).substitute(table_name=table_name)
-                engine_args["table_path"] = table_path
-            else:
-                msg = "Table path (table_path) is not defined."
-                raise ValueError(msg)
-            replica_name: Optional[str] = config.get("replica_name")
-            if replica_name is not None:
-                engine_args["replica_name"] = replica_name
-            else:
-                msg = "Replica name (replica_name) is not defined."
-                raise ValueError(msg)
+    if config is not None and engine_type in (
+        SupportedEngines.REPLICATED_MERGE_TREE,
+        SupportedEngines.REPLICATED_REPLACING_MERGE_TREE,
+        SupportedEngines.REPLICATED_SUMMING_MERGE_TREE,
+        SupportedEngines.REPLICATED_AGGREGATING_MERGE_TREE,
+    ):
+        table_path: Optional[str] = config.get("table_path")
+        if table_path is not None:
+            if "$" in table_path:
+                table_path = Template(table_path).substitute(table_name=table_name)
+            engine_args["table_path"] = table_path
+        else:
+            msg = "Table path (table_path) is not defined."
+            raise ValueError(msg)
+        replica_name: Optional[str] = config.get("replica_name")
+        if replica_name is not None:
+            engine_args["replica_name"] = replica_name
+        else:
+            msg = "Replica name (replica_name) is not defined."
+            raise ValueError(msg)
 
     engine_class = get_engine_class(engine_type)
 
