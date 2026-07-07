@@ -15,8 +15,8 @@ from clickhouse_sqlalchemy import (
 )
 from singer_sdk import typing as th
 from singer_sdk.connectors import SQLConnector
+from sqlalchemy.engine import URL
 from sqlalchemy import Column, MetaData, create_engine, text
->>>>>>> 0066845 ([MEL-508] auto create db)
 
 from target_clickhouse.engine_class import SupportedEngines, create_engine_wrapper
 from target_clickhouse.ssh_tunnel import SSHTunnelForwarder, start_tunnel_if_enabled
