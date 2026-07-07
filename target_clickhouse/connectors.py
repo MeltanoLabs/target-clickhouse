@@ -15,8 +15,8 @@ from clickhouse_sqlalchemy import (
 )
 from singer_sdk import typing as th
 from singer_sdk.connectors import SQLConnector
-from sqlalchemy import Column, MetaData, create_engine
 from sqlalchemy.engine import URL
+from sqlalchemy import Column, MetaData, create_engine, text
 
 from target_clickhouse.engine_class import SupportedEngines, create_engine_wrapper
 from target_clickhouse.ssh_tunnel import SSHTunnelForwarder, start_tunnel_if_enabled
@@ -161,8 +161,33 @@ class ClickhouseConnector(SQLConnector):
         ).render_as_string(hide_password=False)
 
     def create_engine(self) -> Engine:
-        """Create a SQLAlchemy engine for clickhouse."""
+        """Create a SQLAlchemy engine for clickhouse.
+
+        ClickHouse has no schema namespace — a database *is* the schema — so the
+        configured ``database`` must exist before any tables can be created in
+        it. ``prepare_schema`` cannot do this: by the time it runs the engine is
+        already bound to the (possibly missing) target database. We therefore
+        ensure the database exists here first, bootstrapping against the
+        always-present ``default`` database.
+        """
+        self._ensure_database_exists()
         return create_engine(self.get_sqlalchemy_url(self.config))
+
+    def _ensure_database_exists(self) -> None:
+        """Create the configured target database if it does not already exist."""
+        database = self.config.get("database")
+        # ``default`` always exists; nothing to create (and nothing to bootstrap
+        # against if that is also the target).
+        if not database or database == "default":
+            return
+
+        bootstrap_url = self.get_sqlalchemy_url({**self.config, "database": "default"})
+        bootstrap_engine = create_engine(bootstrap_url)
+        try:
+            with bootstrap_engine.connect() as conn:
+                conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{database}`"))
+        finally:
+            bootstrap_engine.dispose()
 
     @contextlib.contextmanager
     def _connect(self) -> typing.Iterator[sqlalchemy.engine.Connection]:
