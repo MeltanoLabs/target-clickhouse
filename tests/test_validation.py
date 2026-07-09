@@ -79,6 +79,22 @@ list_schema = {
     "required": ["name", "variations"],
 }
 
+# Array property declared without an `items` sub-schema, as emitted by some
+# taps (e.g. tap-zendesk's `automations` stream). Exercises the None-items path.
+itemless_list_schema = {
+    "type": "object",
+    "properties": {
+        "name": {"type": ["string", "null"]},
+        "actions": {
+            "type": [
+                "null",
+                "array",
+            ],
+        },
+    },
+    "required": ["name"],
+}
+
 # Validator instances
 validator = Draft7Validator(schema)
 nested_validator = Draft7Validator(nested_schema)
@@ -187,3 +203,14 @@ def test_list_of_dicts_conversion():
     assert isinstance(pre_validated_record["variations"][1]["size"], str), (
         "The 'size' should have been converted to a string."
     )
+
+
+def test_array_without_items_schema_does_not_raise():
+    # Regression: an `array` property without an `items` sub-schema used to
+    # raise `TypeError: 'NoneType' object is not subscriptable` when the record
+    # carried a non-empty list. It should be left untouched instead.
+    record = {"name": "John", "actions": [{"field": "status", "value": "solved"}]}
+    pre_validated_record = pre_validate_for_string_type(record, itemless_list_schema)
+    assert pre_validated_record["actions"] == [
+        {"field": "status", "value": "solved"},
+    ], "An itemless array should pass through unmodified."

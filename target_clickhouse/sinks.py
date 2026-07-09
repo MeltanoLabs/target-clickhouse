@@ -483,13 +483,19 @@ def pre_validate_for_string_type(
             )
         elif "array" in expected_type and isinstance(value, list):
             items_schema = key_properties.get("items")
-            for i, item in enumerate(value):
-                if "object" in items_schema["type"] and isinstance(item, dict):
-                    value[i] = pre_validate_for_string_type(
-                        item,
-                        key_properties.get("items"),
-                        logger,
-                    )
+            # Some taps declare `type: array` without an `items` sub-schema (or
+            # with an itemless schema). There is nothing to recurse into in that
+            # case, so skip rather than subscript a None items schema.
+            if items_schema and items_schema.get("type") is not None:
+                for i, item in enumerate(value):
+                    if "object" in items_schema["type"] and isinstance(
+                        item, dict,
+                    ):
+                        value[i] = pre_validate_for_string_type(
+                            item,
+                            items_schema,
+                            logger,
+                        )
         elif "string" in expected_type and not isinstance(value, str):
             # Convert the value to string if it's not already a string.
             record[key] = (
