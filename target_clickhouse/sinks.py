@@ -3,28 +3,37 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
+import os
+from collections.abc import Iterable, Sequence
 from logging import Logger
-from typing import Any, Iterable
+from typing import Any
 
 import backoff
 import jsonschema.exceptions as jsonschema_exceptions
+import pyarrow as pa
 import simplejson as json
 import sqlalchemy
-from pendulum import now
 from requests.exceptions import ConnectionError as RequestsConnectionError
+from singer_sdk.helpers._batch import BaseBatchFileEncoding
 from singer_sdk.helpers._compat import (
     date_fromisoformat,
     datetime_fromisoformat,
     time_fromisoformat,
 )
 from singer_sdk.helpers._typing import (
-    DatetimeErrorTreatmentEnum,
     get_datelike_property_type,
     handle_invalid_timestamp_in_record,
 )
-from singer_sdk.sinks import SQLSink
+from singer_sdk.helpers.conform import DatetimeErrorTreatmentEnum
+from singer_sdk.sql import SQLSink
 from sqlalchemy.sql.expression import bindparam
 
+from target_clickhouse.arrow_batch import (
+    ARROW_ENCODING_FORMAT,
+    read_arrow_batch_file,
+    resolve_manifest_path,
+)
 from target_clickhouse.connectors import ClickhouseConnector
 
 # Retried on the native insert path -- deliberately narrow. requests.ConnectionError
@@ -91,7 +100,7 @@ class ClickhouseSink(SQLSink):
     def full_table_name(self) -> str:
         """Return the fully qualified table name.
 
-        Returns
+        Returns:
             The fully qualified table name.
 
         """
@@ -117,7 +126,7 @@ class ClickhouseSink(SQLSink):
         full_table_name: str,
         schema: dict,
         records: Iterable[dict[str, Any]],
-    ) -> int | None:
+    ) -> int | None:  # ty:ignore[invalid-method-override]
         """Bulk insert records to an existing destination table.
 
         For the (default) ``http`` driver this uses ``clickhouse-connect``'s native
@@ -177,9 +186,8 @@ class ClickhouseSink(SQLSink):
         """Whether to use the fast clickhouse-connect columnar insert path."""
         # clickhouse-connect speaks the HTTP protocol; only use it for the http
         # driver and when the user has not pinned an explicit sqlalchemy_url.
-        return (
-            self.config.get("driver", "http") == "http"
-            and not self.config.get("sqlalchemy_url")
+        return self.config.get("driver", "http") == "http" and not self.config.get(
+            "sqlalchemy_url",
         )
 
     @property
@@ -189,7 +197,7 @@ class ClickhouseSink(SQLSink):
         if client is not None:
             return client
 
-        import clickhouse_connect
+        import clickhouse_connect  # noqa: PLC0415
 
         # Route through the connector's tunnel-aware host/port -- this is the
         # native bulk-insert path (the connector's whole reason for existing),
@@ -243,7 +251,9 @@ class ClickhouseSink(SQLSink):
         )
         def _attempt() -> int | None:
             return self._bulk_insert_via_clickhouse_connect(
-                full_table_name, schema, records,
+                full_table_name,
+                schema,
+                records,
             )
 
         return _attempt()
@@ -294,6 +304,170 @@ class ClickhouseSink(SQLSink):
         )
         return len(records)
 
+    # Custom methods to process Arrow BATCH files
+
+    def process_batch_files(
+        self,
+        encoding: BaseBatchFileEncoding,
+        files: Sequence[str],
+    ) -> None:
+        """Process a batch file with the given batch context.
+
+        Args:
+            encoding: The batch file encoding.
+            files: The batch files to process.
+
+        """
+        if encoding.format == ARROW_ENCODING_FORMAT:
+            record_count = self._process_arrow_batch_files(files)
+            with self.record_counter_metric as counter:
+                counter.increment(record_count)
+        else:
+            super().process_batch_files(encoding, files)
+
+    def _process_arrow_batch_files(self, files: Sequence[str]) -> int:
+        """Read and insert each Arrow IPC manifest file's rows.
+
+        Args:
+            files: The Arrow IPC manifest files (``file://`` URIs) to process.
+                Per the tap-mysql/mapper-fivetran convention these are
+                consume-once -- nothing else will read them again.
+
+        Returns:
+            The number of rows inserted.
+
+        """
+        total = 0
+        for file_uri in files:
+            path = resolve_manifest_path(file_uri)
+            table = read_arrow_batch_file(path)
+            total += self._insert_arrow_table(table)
+
+            if self.config.get("clean_up_batch_files") and os.path.exists(path):  # noqa: PTH110
+                os.remove(path)  # noqa: PTH107
+
+        return total
+
+    def _insert_arrow_table(self, table: pa.Table) -> int:
+        """Insert an Arrow table's rows, dispatching by driver.
+
+        Args:
+            table: The Arrow table to insert.
+
+        Returns:
+            The number of rows inserted.
+
+        """
+        if table.num_rows == 0:
+            return 0
+
+        table = self._conform_arrow_table_columns(table)
+
+        if self._use_clickhouse_connect():
+            try:
+                return self._insert_arrow_via_clickhouse_connect_with_retry(table)
+            except Exception as e:  # noqa: BLE001
+                # Same safety net as the JSON-record fast path: any failure of the
+                # columnar Arrow insert falls back to the proven row-based path.
+                self.logger.warning(
+                    "clickhouse-connect Arrow insert failed (%s); "
+                    "falling back to the row-based insert path.",
+                    e,
+                )
+                # bulk_insert_records()'s return value is the DBAPI cursor's
+                # `rowcount`, which clickhouse_sqlalchemy's HTTP driver reports as
+                # -1 (DB-API's "not determinable" sentinel) rather than an actual
+                # count -- trusting it here would report -1 rows inserted even
+                # though the insert fully succeeded. table.num_rows is already
+                # known (it's the batch file we just read) and bulk_insert_records
+                # either inserts every row or raises, so it's ground truth.
+                self.bulk_insert_records(
+                    self.full_table_name,
+                    self.schema,
+                    table.to_pylist(),
+                )
+                return table.num_rows
+
+        if self.config.get("driver") == "native" and not self.config.get(
+            "sqlalchemy_url",
+        ):
+            return self._insert_arrow_via_native_driver(table)
+
+        # `asynch` driver, or an explicit `sqlalchemy_url`: neither has a fast
+        # columnar path, so reuse the existing generic insert unchanged. Return
+        # table.num_rows rather than bulk_insert_records()'s return value for the
+        # same reason as the fallback path above -- the SQLAlchemy HTTP driver's
+        # rowcount is often -1 (undeterminable), not a real count.
+        self.bulk_insert_records(self.full_table_name, self.schema, table.to_pylist())
+        return table.num_rows
+
+    def _conform_arrow_table_columns(self, table: pa.Table) -> pa.Table:
+        """Rename an Arrow table's columns to match the target's conformed names.
+
+        Mirrors ``conform_record``'s per-key ``conform_name`` call, so Arrow
+        column names line up with the columns the connector actually created
+        (e.g. camelCase ``Id`` -> ``id``).
+        """
+        conformed_names = [
+            self.conform_name(name, "column") for name in table.schema.names
+        ]
+        return table.rename_columns(conformed_names)
+
+    def _insert_arrow_via_clickhouse_connect_with_retry(self, table: pa.Table) -> int:
+        """Retry the Arrow insert on connection-establishment failures.
+
+        See RETRYABLE_INSERT_EXCEPTIONS for why only that narrow class is
+        retried here -- anything else re-raises immediately so the caller's
+        existing fallback-to-SQLAlchemy behavior is unchanged.
+        """
+
+        @backoff.on_exception(
+            backoff.expo,
+            RETRYABLE_INSERT_EXCEPTIONS,
+            max_tries=lambda: self.config.get("insert_retry_max_tries", 3),
+            max_value=30,
+            logger=self.logger,
+        )
+        def _attempt() -> int:
+            return self._insert_arrow_via_clickhouse_connect(table)
+
+        return _attempt()
+
+    def _insert_arrow_via_clickhouse_connect(self, table: pa.Table) -> int:
+        """Insert an Arrow table using clickhouse-connect's native Arrow format insert.
+
+        Bypasses per-row Python object materialization entirely -- the
+        table's buffers are handed to clickhouse-connect as-is.
+        """
+        database, ch_table = self._split_database_table(self.full_table_name)
+        self._clickhouse_connect_client.insert_arrow(
+            table=ch_table,
+            arrow_table=table,
+            database=database,
+        )
+        return table.num_rows
+
+    def _insert_arrow_via_native_driver(self, table: pa.Table) -> int:
+        """Insert an Arrow table using clickhouse-driver's columnar insert.
+
+        Used for the ``native`` driver, where clickhouse-connect isn't in
+        play. clickhouse-driver has no Arrow support, so the table is
+        converted to column-major Python lists -- still avoiding the
+        row-major transpose the generic SQLAlchemy path would otherwise
+        require.
+        """
+        column_names = table.schema.names
+        column_data = [table.column(i).to_pylist() for i in range(table.num_columns)]
+        columns_sql = ", ".join(f"`{name}`" for name in column_names)
+
+        with self.connector.native_driver_client() as client:
+            client.execute(
+                f"INSERT INTO {self.full_table_name} ({columns_sql}) VALUES",
+                column_data,
+                columnar=True,
+            )
+        return table.num_rows
+
     def clean_up(self) -> None:
         """Close the clickhouse-connect client (if opened) at end of stream."""
         client = getattr(self, "_ch_connect_client", None)
@@ -315,7 +489,7 @@ class ClickhouseSink(SQLSink):
         if not self.connector.table_exists(self.full_table_name):
             return
 
-        deleted_at = now()
+        deleted_at = dt.datetime.now(dt.timezone.utc)
 
         if not self.connector.column_exists(
             full_table_name=self.full_table_name,
@@ -374,7 +548,7 @@ class ClickhouseSink(SQLSink):
         record = pre_validate_for_string_type(record, self.schema, self.logger)
 
         try:
-            self._validator.validate(record)
+            self._validator.validate(record)  # ty:ignore[unresolved-attribute]
             self._parse_timestamps_in_record(
                 record=record,
                 schema=self.schema,
@@ -433,7 +607,7 @@ class ClickhouseSink(SQLSink):
                     date_val = handle_invalid_timestamp_in_record(
                         record,
                         [key],
-                        date_val,
+                        date_val,  # ty:ignore[invalid-argument-type]
                         datelike_type,
                         ex,
                         treatment,
@@ -442,7 +616,7 @@ class ClickhouseSink(SQLSink):
                 record[key] = date_val
 
 
-def pre_validate_for_string_type(
+def pre_validate_for_string_type(  # noqa: PLR0912
     record: dict,
     schema: dict,
     logger: Logger | None = None,
@@ -489,7 +663,8 @@ def pre_validate_for_string_type(
             if items_schema and items_schema.get("type") is not None:
                 for i, item in enumerate(value):
                     if "object" in items_schema["type"] and isinstance(
-                        item, dict,
+                        item,
+                        dict,
                     ):
                         value[i] = pre_validate_for_string_type(
                             item,

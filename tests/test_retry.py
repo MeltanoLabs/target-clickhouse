@@ -54,10 +54,14 @@ def test_retries_on_connection_error_then_succeeds() -> None:
         return len(records)
 
     with patch.object(
-        sink, "_bulk_insert_via_clickhouse_connect", side_effect=flaky_insert,
+        sink,
+        "_bulk_insert_via_clickhouse_connect",
+        side_effect=flaky_insert,
     ):
         result = sink._bulk_insert_via_clickhouse_connect_with_retry(  # noqa: SLF001
-            "default.retry_test_stream", {}, [{"id": 1}],
+            "default.retry_test_stream",
+            {},
+            [{"id": 1}],
         )
 
     assert call_count == 3  # noqa: PLR2004
@@ -78,12 +82,16 @@ def test_gives_up_after_max_tries() -> None:
 
     with (
         patch.object(
-            sink, "_bulk_insert_via_clickhouse_connect", side_effect=always_fails,
+            sink,
+            "_bulk_insert_via_clickhouse_connect",
+            side_effect=always_fails,
         ),
         pytest.raises(RequestsConnectionError),
     ):
         sink._bulk_insert_via_clickhouse_connect_with_retry(  # noqa: SLF001
-            "default.retry_test_stream", {}, [{"id": 1}],
+            "default.retry_test_stream",
+            {},
+            [{"id": 1}],
         )
 
     # respected insert_retry_max_tries, didn't retry forever
@@ -109,12 +117,16 @@ def test_does_not_retry_read_timeout() -> None:
 
     with (
         patch.object(
-            sink, "_bulk_insert_via_clickhouse_connect", side_effect=timeout_once,
+            sink,
+            "_bulk_insert_via_clickhouse_connect",
+            side_effect=timeout_once,
         ),
         pytest.raises(ReadTimeout),
     ):
         sink._bulk_insert_via_clickhouse_connect_with_retry(  # noqa: SLF001
-            "default.retry_test_stream", {}, [{"id": 1}],
+            "default.retry_test_stream",
+            {},
+            [{"id": 1}],
         )
 
     assert call_count == 1  # not retried at all
@@ -134,7 +146,9 @@ def test_bulk_insert_records_falls_back_after_retries_exhausted() -> None:
 
     with (
         patch.object(
-            sink, "_bulk_insert_via_clickhouse_connect", side_effect=always_fails,
+            sink,
+            "_bulk_insert_via_clickhouse_connect",
+            side_effect=always_fails,
         ),
         patch(
             "target_clickhouse.sinks.SQLSink.bulk_insert_records",

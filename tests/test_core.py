@@ -44,9 +44,7 @@ StandardTargetTests = get_target_test_class(
 )
 
 
-class TestStandardTargetClickhouse(
-    StandardTargetTests,  # type: ignore[misc, valid-type]
-):
+class TestStandardTargetClickhouse(StandardTargetTests):  # type: ignore[misc, valid-type]  # ty:ignore[unsupported-base]
     """Standard Target Tests."""
 
 
@@ -57,5 +55,5 @@ SpreadTargetTests = get_target_test_class(
 )
 
 
-class TestSpreadTargetClickhouse(SpreadTargetTests):  # type: ignore[misc, valid-type]
+class TestSpreadTargetClickhouse(SpreadTargetTests):  # type: ignore[misc, valid-type]  # ty:ignore[unsupported-base]
     """Standard Target Tests."""

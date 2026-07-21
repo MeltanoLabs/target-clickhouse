@@ -1,19 +1,9 @@
 r"""Tests for enable_json (ClickHouse's native JSON column type).
 
-Only stabilized in ClickHouse 24.8+ -- the standard CI ClickHouse service
-(clickhouse-server:23.4-alpine, see .github/workflows/ci_workflow.yml)
-rejects it outright, so these tests target a separate, modern instance and
-are skipped unless CH_JSON_TEST_HOST is set.
-
-To run locally against a modern ClickHouse:
-
-    docker run -d --name clickhouse-json-test -p 28123:8123 \
-      clickhouse/clickhouse-server:latest
-    export CH_JSON_TEST_HOST=localhost
-    export CH_JSON_TEST_PORT=28123
-    # only needed if your instance has a password set (a fresh
-    # clickhouse-server:latest container with no config does not):
-    export CH_JSON_TEST_PASSWORD=...
+Only stabilized in ClickHouse 24.8+. The standard test/CI ClickHouse service
+(clickhouse-server:26.6-alpine, see compose.yml / .github/workflows/ci.yml)
+is well past that, so these run against it by default -- set CH_JSON_TEST_HOST
+(and friends) to point at a different instance instead.
 """
 
 from __future__ import annotations
@@ -22,23 +12,14 @@ import io
 import json
 import os
 
-import pytest
 from clickhouse_sqlalchemy.drivers.base import clickhouse_dialect
 
 from target_clickhouse.connectors import ClickhouseConnector, ClickHouseJSON
 from target_clickhouse.target import TargetClickhouse
 
-JSON_TEST_HOST = os.environ.get("CH_JSON_TEST_HOST")
-JSON_TEST_PORT = int(os.environ.get("CH_JSON_TEST_PORT", "8123"))
+JSON_TEST_HOST = os.environ.get("CH_JSON_TEST_HOST", "localhost")
+JSON_TEST_PORT = int(os.environ.get("CH_JSON_TEST_PORT", "18123"))
 JSON_TEST_PASSWORD = os.environ.get("CH_JSON_TEST_PASSWORD", "")
-
-pytestmark = pytest.mark.skipif(
-    not JSON_TEST_HOST,
-    reason=(
-        "Requires a ClickHouse 24.8+ instance -- set CH_JSON_TEST_HOST to run "
-        "(see module docstring for setup)."
-    ),
-)
 
 
 def _config(**overrides: object) -> dict:
@@ -50,7 +31,7 @@ def _config(**overrides: object) -> dict:
         "password": JSON_TEST_PASSWORD,
         "database": "default",
         "secure": False,
-        "verify": True,
+        "verify": False,
         **overrides,
     }
 
@@ -108,6 +89,7 @@ def test_object_property_round_trips_as_native_json_end_to_end() -> None:
                 f"SELECT id, metadata, toTypeName(metadata) FROM {stream}",  # noqa: S608
             )
             row = result.fetchone()
+            assert row is not None
             assert row[0] == 1
             assert "JSON" in row[2]
             conn.exec_driver_sql(f"DROP TABLE {stream}")

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import typing as t
+
 from singer_sdk import typing as th
-from singer_sdk.target_base import SQLTarget
+from singer_sdk.helpers.capabilities import CapabilitiesEnum, PluginCapabilities
+from singer_sdk.sql import SQLTarget
 
 from target_clickhouse.engine_class import SupportedEngines
 from target_clickhouse.sinks import (
@@ -21,7 +24,7 @@ class TargetClickhouse(SQLTarget):
             th.StringType,
             secret=True,  # Flag config as protected.
             description="The SQLAlchemy connection string for the ClickHouse database. "
-                        "Used if set, otherwise separate settings are used",
+            "Used if set, otherwise separate settings are used",
         ),
         th.Property(
             "driver",
@@ -135,7 +138,6 @@ class TargetClickhouse(SQLTarget):
             description="Should secure connection need to verify SSL/TLS",
             default=True,
         ),
-
         # other settings
         th.Property(
             "engine_type",
@@ -155,36 +157,36 @@ class TargetClickhouse(SQLTarget):
             th.StringType,
             required=False,
             description="The table path for replicated tables. This is required when "
-                        "using any of the replication engines. Check out the "
-                        "[documentation](https://clickhouse.com/docs/en/engines/table-engines/"
-                        "mergetree-family/replication#replicatedmergetree-parameters) "
-                        "for more information. Use `$table_name` to substitute the "
-                        "table name.",
+            "using any of the replication engines. Check out the "
+            "[documentation](https://clickhouse.com/docs/en/engines/table-engines/"
+            "mergetree-family/replication#replicatedmergetree-parameters) "
+            "for more information. Use `$table_name` to substitute the "
+            "table name.",
         ),
         th.Property(
             "replica_name",
             th.StringType,
             required=False,
             description="The `replica_name` for replicated tables. This is required "
-                        "when using any of the replication engines.",
+            "when using any of the replication engines.",
         ),
         th.Property(
             "cluster_name",
             th.StringType,
             required=False,
             description="The cluster to create tables in. This is passed as the "
-                        "`clickhouse_cluster` argument when creating a table. "
-                        "[Documentation]"
-                        "(https://clickhouse.com/docs/en/"
-                        "sql-reference/distributed-ddl) "
-                        "can be found here.",
+            "`clickhouse_cluster` argument when creating a table. "
+            "[Documentation]"
+            "(https://clickhouse.com/docs/en/"
+            "sql-reference/distributed-ddl) "
+            "can be found here.",
         ),
         th.Property(
             "default_target_schema",
             th.StringType,
             required=False,
             description="The default target database schema name to use for "
-                        "all streams.",
+            "all streams.",
         ),
         th.Property(
             "optimize_after",
@@ -192,7 +194,7 @@ class TargetClickhouse(SQLTarget):
             required=False,
             default=False,
             description="Run 'OPTIMIZE TABLE' after data insert. Useful when"
-                        "table engine removes duplicate rows.",
+            "table engine removes duplicate rows.",
         ),
         th.Property(
             "async_insert",
@@ -200,16 +202,16 @@ class TargetClickhouse(SQLTarget):
             required=False,
             default=False,
             description="Enable ClickHouse server-side async inserts for the "
-                        "(default) http driver. Coalesces inserts into larger parts "
-                        "to reduce part churn on high-volume ingestion. The target "
-                        "waits for the async insert to flush before reporting success.",
+            "(default) http driver. Coalesces inserts into larger parts "
+            "to reduce part churn on high-volume ingestion. The target "
+            "waits for the async insert to flush before reporting success.",
         ),
         th.Property(
             "order_by_keys",
             th.ArrayType(th.StringType),
             required=False,
             description="List of columns to order by. Used for engines that require "
-                        "ordering.",
+            "ordering.",
         ),
         th.Property(
             "insert_retry_max_tries",
@@ -217,15 +219,15 @@ class TargetClickhouse(SQLTarget):
             required=False,
             default=3,
             description="Max attempts for the native (http driver) bulk insert when "
-                        "the connection to ClickHouse cannot be established (DNS "
-                        "failure, connection refused, connect timeout). Uses "
-                        "exponential backoff between attempts. Only retries "
-                        "connection-establishment failures, where no data could "
-                        "have been sent yet -- a timeout or error response after the "
-                        "server started receiving the batch is not retried here, to "
-                        "avoid risking a duplicate insert (ClickHouse has no "
-                        "transactions to roll back a partial one). Set to 1 to "
-                        "disable retries.",
+            "the connection to ClickHouse cannot be established (DNS "
+            "failure, connection refused, connect timeout). Uses "
+            "exponential backoff between attempts. Only retries "
+            "connection-establishment failures, where no data could "
+            "have been sent yet -- a timeout or error response after the "
+            "server started receiving the batch is not retried here, to "
+            "avoid risking a duplicate insert (ClickHouse has no "
+            "transactions to roll back a partial one). Set to 1 to "
+            "disable retries.",
         ),
         th.Property(
             "max_batch_bytes",
@@ -233,10 +235,10 @@ class TargetClickhouse(SQLTarget):
             required=False,
             default=70_000_000,
             description="Flush the current batch once its accumulated (approximate, "
-                        "serialized) record size reaches this many bytes, even if "
-                        "batch_size_rows hasn't been reached yet. A safety net "
-                        "alongside row-count batching for streams with unusually "
-                        "wide records (large JSON blobs, long strings).",
+            "serialized) record size reaches this many bytes, even if "
+            "batch_size_rows hasn't been reached yet. A safety net "
+            "alongside row-count batching for streams with unusually "
+            "wide records (large JSON blobs, long strings).",
         ),
         th.Property(
             "enable_json",
@@ -244,15 +246,31 @@ class TargetClickhouse(SQLTarget):
             required=False,
             default=False,
             description="Use ClickHouse's native JSON column type for object-typed "
-                        "properties, instead of storing them as a JSON-encoded "
-                        "string. Requires ClickHouse 24.8 or later -- the JSON type "
-                        "only stabilized there, and older servers reject it "
-                        "outright. Leave disabled (default) unless you've confirmed "
-                        "your ClickHouse server version supports it.",
+            "properties, instead of storing them as a JSON-encoded "
+            "string. Requires ClickHouse 24.8 or later -- the JSON type "
+            "only stabilized there, and older servers reject it "
+            "outright. Leave disabled (default) unless you've confirmed "
+            "your ClickHouse server version supports it.",
+        ),
+        th.Property(
+            "clean_up_batch_files",
+            th.BooleanType,
+            required=False,
+            default=True,
+            description="Whether to remove Arrow BATCH manifest files after "
+            "processing. Per the tap-mysql/mapper-fivetran convention "
+            "these files are consume-once, so this is safe to leave "
+            "enabled (default) in the common case.",
         ),
     ).to_dict()
 
     default_sink_class = ClickhouseSink
+
+    #: A list of capabilities supported by this target.
+    capabilities: t.ClassVar[list[CapabilitiesEnum]] = [
+        *SQLTarget.capabilities,
+        PluginCapabilities.BATCH,
+    ]
 
 
 if __name__ == "__main__":

@@ -1,0 +1,21 @@
+requires = [
+    "tox>=4.55",
+    "tox-uv>=1.35",
+]
+env_list = [
+    "3.10",
+    "3.11",
+]
+
+[env_run_base]
+dependency_groups = [ "dev" ]
+commands = [
+    ["pytest", { replace = "posargs", default = [ "tests" ], extend = true } ],
+]
+
+[env.lint]
+dependency_groups = [ "dev" ]
+commands = [
+    [ "ruff", "check", "--fix" ],
+    [ "ruff", "format" ],
+]

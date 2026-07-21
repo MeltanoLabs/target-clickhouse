@@ -55,12 +55,22 @@ def _config(**overrides: object) -> dict:
     }
 
 
-def _run(config: dict, stream: str, schema: dict, records: list[dict],
-         *, key_properties: list[str]) -> None:
+def _run(
+    config: dict,
+    stream: str,
+    schema: dict,
+    records: list[dict],
+    *,
+    key_properties: list[str],
+) -> None:
     """Feed one SCHEMA + records + STATE through a fresh target invocation."""
     msgs: list[dict] = [
-        {"type": "SCHEMA", "stream": stream, "schema": schema,
-         "key_properties": key_properties},
+        {
+            "type": "SCHEMA",
+            "stream": stream,
+            "schema": schema,
+            "key_properties": key_properties,
+        },
     ]
     msgs += [{"type": "RECORD", "stream": stream, "record": r} for r in records]
     msgs.append({"type": "STATE", "value": {}})
@@ -106,11 +116,14 @@ def test_keyed_stream_upserts_on_primary_key() -> None:
     try:
         _exec(connector, f"DROP TABLE IF EXISTS {stream}")
         # Two loads of id=1 (plus a distinct id=2) across separate runs.
-        _run(config, stream, schema,
-             [{"id": 1, "value": "v1"}, {"id": 2, "value": "x"}],
-             key_properties=["id"])
-        _run(config, stream, schema, [{"id": 1, "value": "v2"}],
-             key_properties=["id"])
+        _run(
+            config,
+            stream,
+            schema,
+            [{"id": 1, "value": "v1"}, {"id": 2, "value": "x"}],
+            key_properties=["id"],
+        )
+        _run(config, stream, schema, [{"id": 1, "value": "v2"}], key_properties=["id"])
         _exec(connector, f"OPTIMIZE TABLE {stream} FINAL")
 
         assert _table_engine(connector, stream) == "ReplacingMergeTree"
@@ -136,9 +149,13 @@ def test_keyless_stream_does_not_collapse() -> None:
     expected_rows = 3
     try:
         _exec(connector, f"DROP TABLE IF EXISTS {stream}")
-        _run(config, stream, schema,
-             [{"a": "x", "b": 1}, {"a": "y", "b": 2}, {"a": "z", "b": 3}],
-             key_properties=[])
+        _run(
+            config,
+            stream,
+            schema,
+            [{"a": "x", "b": 1}, {"a": "y", "b": 2}, {"a": "z", "b": 3}],
+            key_properties=[],
+        )
         _exec(connector, f"OPTIMIZE TABLE {stream} FINAL")
 
         # Fallback engaged: stored as MergeTree, so all rows survive.

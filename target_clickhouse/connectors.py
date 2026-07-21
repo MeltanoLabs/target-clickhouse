@@ -2,26 +2,26 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import signal
 import typing
 from typing import TYPE_CHECKING, Any
 
 import sqlalchemy.types
-from clickhouse_sqlalchemy import (
-    Table,
-)
+from clickhouse_sqlalchemy import Table
 from clickhouse_sqlalchemy import (
     types as clickhouse_sqlalchemy_types,
 )
-from singer_sdk import typing as th
-from singer_sdk.connectors import SQLConnector
-from sqlalchemy.engine import URL
+from singer_sdk.sql import SQLConnector
 from sqlalchemy import Column, MetaData, create_engine, text
+from sqlalchemy.engine import URL
 
 from target_clickhouse.engine_class import SupportedEngines, create_engine_wrapper
 from target_clickhouse.ssh_tunnel import SSHTunnelForwarder, start_tunnel_if_enabled
 
 if TYPE_CHECKING:
+    from clickhouse_driver.client import Client as ClickhouseDriverClient
+    from singer_sdk.sql.connector import JSONSchemaToSQL
     from sqlalchemy.engine import Engine
 
 
@@ -73,7 +73,7 @@ class ClickhouseConnector(SQLConnector):
         super().__init__(*args, **kwargs)
         self._ssh_tunnel: SSHTunnelForwarder | None = None
 
-    def _tunneled_host_port(self, config: dict) -> tuple[str, int]:
+    def _tunneled_host_port(self, config: dict) -> tuple[str, int | None]:
         """Return the (host, port) to connect to, starting an SSH tunnel if configured.
 
         The connector is a singleton reused for the life of the sync, so the
@@ -104,6 +104,26 @@ class ClickhouseConnector(SQLConnector):
         """Stop the SSH tunnel, if one was started."""
         if self._ssh_tunnel is not None:
             self._ssh_tunnel.stop()
+
+    @contextlib.contextmanager
+    def native_driver_client(self) -> typing.Iterator[ClickhouseDriverClient]:
+        """Yield the underlying clickhouse-driver ``Client`` for the ``native`` driver.
+
+        clickhouse-sqlalchemy's native dialect (``clickhouse_sqlalchemy.drivers.
+        native.connector.Connection``) wraps a ``clickhouse_driver.Client``
+        instance as its ``transport`` attribute. Reaching through the DBAPI
+        connection this way gives access to clickhouse-driver's columnar
+        insert (``Client.execute(..., columnar=True)``), which the SQLAlchemy
+        Core layer has no equivalent for.
+
+        The checked-out pool connection is returned to the pool (not closed at
+        the transport level) when the context exits, same as ``_connect()``.
+        """
+        raw_connection = self._engine.raw_connection()
+        try:
+            yield raw_connection.dbapi_connection.transport  # ty:ignore[unresolved-attribute]
+        finally:
+            raw_connection.close()
 
     def get_sqlalchemy_url(self, config: dict) -> str:
         """Generates a SQLAlchemy URL for clickhouse.
@@ -136,7 +156,7 @@ class ClickhouseConnector(SQLConnector):
                 if not config["verify"]:
                     query["verify"] = "False"
                     # disable urllib3 warning
-                    import urllib3
+                    import urllib3  # noqa: PLC0415
 
                     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
             else:
@@ -199,6 +219,30 @@ class ClickhouseConnector(SQLConnector):
         with self._engine.connect().execution_options(**kwargs) as conn:
             yield conn
 
+    @functools.cached_property
+    def jsonschema_to_sql(self) -> JSONSchemaToSQL:
+        """Register ClickHouse-specific JSON Schema -> SQL type mappings.
+
+        Overriding this (rather than ``to_sql_type`` outright) lets the base
+        ``JSONSchemaToSQL.to_sql_type()`` handle dispatch -- including the
+        ``x-singer.decimal`` format (a ``string``-typed schema annotation,
+        untouched by the "number" -> FLOAT handler below since it's a
+        different JSON Schema ``type``), which produces a real
+        ``DECIMAL(precision, scale)``.
+        """
+        to_sql = super().jsonschema_to_sql
+        to_sql.register_format_handler("date", clickhouse_sqlalchemy_types.Date32)
+        to_sql.register_type_handler("integer", clickhouse_sqlalchemy_types.Int64)
+        # Clickhouse does not support the DECIMAL type without providing
+        # precision, so plain "number" schemas use FLOAT instead.
+        to_sql.register_type_handler("number", sqlalchemy.types.FLOAT)
+        if self.config.get("enable_json", False):
+            # ClickHouse's JSON type only stabilized in 24.8+, and this
+            # connector's own CI target (23.4) rejects it outright, so it
+            # must never be the default.
+            to_sql.register_type_handler("object", ClickHouseJSON)
+        return to_sql
+
     def to_sql_type(
         self,
         jsonschema_type: dict,
@@ -216,48 +260,20 @@ class ClickhouseConnector(SQLConnector):
             The SQLAlchemy type representation of the data type.
 
         """
-        sql_type = th.to_sql_type(jsonschema_type)
+        sql_type = self.jsonschema_to_sql.to_sql_type(jsonschema_type)
         is_primary_key = kwargs.get("is_primary_key", False)
 
-        # th.to_sql_type() already resolved "object" schemas to a generic VARCHAR
-        # (indistinguishable at this point from a genuine string property), so
-        # object detection has to look at the original JSON Schema type, not
-        # sql_type. Opt-in only (enable_json): ClickHouse's JSON type only
-        # stabilized in 24.8+, and this connector's own CI target (23.4) rejects
-        # it outright, so it must never be the default.
-        schema_type_raw = jsonschema_type.get("type", [])
-        is_object_schema = "object" in (
-            schema_type_raw if isinstance(schema_type_raw, list) else [schema_type_raw]
-        )
-        if is_object_schema and self.config.get("enable_json", False):
-            sql_type = typing.cast(sqlalchemy.types.TypeEngine, ClickHouseJSON())
-        # Clickhouse does not support the DECIMAL type without providing precision,
-        # so we need to use the FLOAT type.
-        elif type(sql_type) == sqlalchemy.types.DECIMAL:
-            sql_type = typing.cast(
-                sqlalchemy.types.TypeEngine,
-                sqlalchemy.types.FLOAT(),
-            )
-        elif type(sql_type) == sqlalchemy.types.INTEGER:
-            sql_type = typing.cast(
-                sqlalchemy.types.TypeEngine,
-                clickhouse_sqlalchemy_types.Int64(),
-            )
-        elif type(sql_type) == sqlalchemy.types.DATE:
-            sql_type = typing.cast(
-                sqlalchemy.types.TypeEngine,
-                clickhouse_sqlalchemy_types.Nullable(clickhouse_sqlalchemy_types.Date32)
-                if not is_primary_key
-                else clickhouse_sqlalchemy_types.Date32,
-            )
         # All date and time types should be flagged as Nullable to allow for NULL value.
-        elif (
-            type(sql_type)
-            in [
-                sqlalchemy.types.TIMESTAMP,
-                sqlalchemy.types.TIME,
-                sqlalchemy.types.DATETIME,
-            ]
+        if (
+            isinstance(
+                sql_type,
+                (
+                    sqlalchemy.types.TIMESTAMP,
+                    sqlalchemy.types.TIME,
+                    sqlalchemy.types.DATETIME,
+                    clickhouse_sqlalchemy_types.Date32,
+                ),
+            )
             and not is_primary_key
         ):
             sql_type = clickhouse_sqlalchemy_types.Nullable(sql_type)
@@ -282,7 +298,7 @@ class ClickhouseConnector(SQLConnector):
         primary_keys: list[str] | None = None,
         partition_keys: list[str] | None = None,
         as_temp_table: bool = False,
-    ) -> None:
+    ) -> None:  # ty:ignore[invalid-method-override]
         """Create an empty target table, using Clickhouse Engine.
 
         Args:
@@ -343,7 +359,7 @@ class ClickhouseConnector(SQLConnector):
         table_engine = create_engine_wrapper(
             engine_type=engine_type,
             primary_keys=primary_keys,
-            table_name=table_name,
+            table_name=table_name,  # ty:ignore[invalid-argument-type]
             config=self.config,
             order_by_keys=self.config.get("order_by_keys"),
         )
@@ -352,10 +368,10 @@ class ClickhouseConnector(SQLConnector):
         if self.config.get("cluster_name"):
             table_args["clickhouse_cluster"] = self.config.get("cluster_name")
 
-        _ = Table(table_name, meta, *columns, table_engine, **table_args)
+        _ = Table(table_name, meta, *columns, table_engine, **table_args)  # ty:ignore[invalid-argument-type]
         meta.create_all(self._engine)
 
-    def prepare_schema(self, _: str) -> None:
+    def prepare_schema(self, _: str) -> None:  # ty:ignore[invalid-method-override]
         """Create the target database schema.
 
         In Clickhouse, a schema is a database, so this method is a no-op.
@@ -371,7 +387,7 @@ class ClickhouseConnector(SQLConnector):
         full_table_name: str,
         column_name: str,
         sql_type: sqlalchemy.types.TypeEngine,
-    ) -> None:
+    ) -> None:  # ty:ignore[invalid-method-override]
         """Adapt target table to provided schema if possible.
 
         Args:
@@ -400,7 +416,7 @@ class ClickhouseConnector(SQLConnector):
         table_name: str,
         column_name: str,
         column_type: sqlalchemy.types.TypeEngine,
-    ) -> sqlalchemy.DDL:
+    ) -> sqlalchemy.DDL:  # ty:ignore[invalid-method-override]
         """Get the create column DDL statement.
 
         Override this if your database uses a different syntax for creating columns.
@@ -436,7 +452,7 @@ class ClickhouseConnector(SQLConnector):
         table_name: str,
         column_name: str,
         column_type: sqlalchemy.types.TypeEngine,
-    ) -> sqlalchemy.DDL:
+    ) -> sqlalchemy.DDL:  # ty:ignore[invalid-method-override]
         """Get the alter column DDL statement.
 
         Overrides the static method in the base class to support ON CLUSTER.

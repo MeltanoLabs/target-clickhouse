@@ -1,48 +1,79 @@
-[tool.poetry]
+[project]
 name = "target-clickhouse"
-version = "0.3.1"
+dynamic = [ "version" ]
 description = "`target-clickhouse` is a Singer target for clickhouse, built with the Meltano Singer SDK."
+authors = [{ name = "Ben Theunissen" }]
+maintainers = [{ name = "Meltano" }]
+requires-python = ">=3.10"
 readme = "README.md"
-authors = ["Ben Theunissen"]
+license = "Apache-2.0"
 keywords = [
     "ELT",
     "clickhouse",
 ]
-license = "Apache-2.0"
-packages = [
-    { include = "target_clickhouse" },
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "singer-sdk~=0.54.5",
+    "clickhouse-sqlalchemy @ git+https://github.com/xzkostyan/clickhouse-sqlalchemy.git@25721c3cd6e094ae1853327ab1de3a5d7144acbd",
+    "clickhouse-connect>=0.7",
+    "paramiko>=4",
+    "python-backoff>=2.3",
+    "simplejson~=4.1",
+    "packaging>=24.0",
+    "pyarrow~=25.0",
+    "clickhouse-driver>=0.2.10",
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.10,<3.12"
-singer-sdk = { version=">=0.44.4,<0.45" }
-fs-s3fs = { version = "^1.1.1", optional = true }
-clickhouse-sqlalchemy = { git = "https://github.com/xzkostyan/clickhouse-sqlalchemy.git", rev = "7ad94b0" }
-clickhouse-connect = ">=0.7"
-paramiko = ">=4"
-backoff = ">=2.0.0"
+[project.optional-dependencies]
+s3 = ["s3fs>=2026.6.0"]
 
-simplejson = "^3.19.2"
-pendulum = ">=2.1,<4"
-packaging = ">=24.0"
+[project.scripts]
+target-clickhouse = "target_clickhouse.target:TargetClickhouse.cli"
 
-[tool.poetry.group.dev.dependencies]
-pytest = ">=9.0.3"
-tox = "^3.25.0"
-ruff = "^0.1.3"
-singer-sdk = { version=">=0.40,<0.45", extras = ["testing"] }
-types-simplejson = "^3.19.0.1"
-types-setuptools = "^69.2.0.20240317"
-pre-commit = "^3.5.0"
+[dependency-groups]
+dev = [
+    "pytest>=9",
+    "tox>=4",
+    "ruff>=0.15",
+    "singer-sdk[testing]~=0.54.5",
+    "types-simplejson>=3.19",
+    "types-setuptools>=83",
+    "pre-commit>=4",
+    "testcontainers[clickhouse]>=4.15.0rc4",
+    "ty>=0.0.61",
+    "mypy>=2.3.0",
+]
 
-[tool.poetry.extras]
-s3 = ["fs-s3fs"]
+[tool.uv]
+default-groups = "all"
 
-[tool.ruff]
+[tool.hatch.build.targets.sdist]
+include = [ "target_clickhouse" ]
+
+[tool.hatch.build.targets.wheel]
+include = [ "target_clickhouse" ]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.version]
+fallback-version = "0.0.0dev0"
+source = "vcs"
+
+[build-system]
+requires = [ "hatchling", "hatch-vcs" ]
+build-backend = "hatchling.build"
+
+[tool.ruff.lint]
 ignore = [
     "ANN001", # missing-return-type
-    "ANN101",  # missing-type-self
-    "ANN102",  # missing-type-cls
     "ANN201",  # missing-return-type-doc
     "D100", # Missing docstring in public module
     "D101", # Missing docstring in public class
@@ -52,8 +83,8 @@ ignore = [
     "FA100", # Forbidden import
     "S101", # Use of assert detected
     "G004", # Logging statement uses string formatting
-    "TCH002",
-    "TCH003",
+    "TC002",
+    "TC003",
     "ANN202",
     "C901",
     "TRY201", # Use of bare 'except'
@@ -63,26 +94,29 @@ ignore = [
     "FBT002",
 ]
 select = ["ALL"]
-src = ["target_clickhouse"]
-target-version = "py37"
 
-[tool.ruff.flake8-annotations]
+[tool.ruff.lint.flake8-annotations]
 allow-star-arg-any = true
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 known-first-party = ["target_clickhouse"]
 
-[tool.ruff.pylint]
-max-args=6
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "INP001",
+]
 
-[[tool.mypy.overrides]]
-disable_error_code = ["name-defined"]
-ignore_missing_imports = true
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
-[build-system]
-requires = ["poetry-core>=1.5.1"]
-build-backend = "poetry.core.masonry.api"
+[tool.ruff.lint.pylint]
+max-args = 6
 
-[tool.poetry.scripts]
-# CLI declaration
-target-clickhouse = 'target_clickhouse.target:TargetClickhouse.cli'
+[tool.pytest]
+minversion = "9"
+filterwarnings = [
+    "error",
+]
+
+[tool.mypy]
+warn_redundant_casts = true
