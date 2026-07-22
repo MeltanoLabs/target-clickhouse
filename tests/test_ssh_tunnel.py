@@ -4,25 +4,16 @@ These tests need a bastion + a ClickHouse instance that is *only* reachable
 through that bastion (not from the test host directly) -- otherwise a test
 could "pass" even if tunneling silently did nothing. That infrastructure
 isn't part of the standard CI ClickHouse service container, so these tests
-are skipped unless the environment variables below point at real containers.
+are skipped unless a key is available at the path below (or
+TARGET_CLICKHOUSE_SSH_TEST_KEY points elsewhere).
 
-To provision locally (mirrors the isolation used to validate this feature):
+To provision locally:
 
-    docker network create sshtunnel-test-net
-    docker run -d --name clickhouse-tunnel-target \
-      --network sshtunnel-test-net clickhouse/clickhouse-server:23.4-alpine
-    ssh-keygen -t ed25519 -f /tmp/ssh-tunnel-test-keys/id_ed25519 -N ""
-    docker run -d --name sshtunnel-bastion \
-      --network sshtunnel-test-net -p 2222:2222 \
-      -e PUBLIC_KEY="$(cat /tmp/ssh-tunnel-test-keys/id_ed25519.pub)" \
-      -e USER_NAME=testuser -e PASSWORD_ACCESS=false -e SUDO_ACCESS=false \
-      lscr.io/linuxserver/openssh-server:latest
-    # linuxserver/openssh-server disables TCP forwarding by default:
-    docker exec sshtunnel-bastion sed -i \
-      's/AllowTcpForwarding no/AllowTcpForwarding yes/' /config/sshd/sshd_config
-    docker restart sshtunnel-bastion
+    ./gen_ssh_tunnel_test_key.sh
+    docker compose --profile ssh-tunnel up -d
 
-    export TARGET_CLICKHOUSE_SSH_TEST_KEY=/tmp/ssh-tunnel-test-keys/id_ed25519
+That's it -- the other env vars below already default to match the
+`ssh-tunnel-bastion` / `clickhouse-tunnel-target` services in compose.yml.
 """
 
 from __future__ import annotations
@@ -30,6 +21,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
 from pathlib import Path
 
 import pytest
@@ -37,19 +29,27 @@ import pytest
 from target_clickhouse.connectors import ClickhouseConnector
 from target_clickhouse.target import TargetClickhouse
 
-SSH_KEY_PATH = os.environ.get("TARGET_CLICKHOUSE_SSH_TEST_KEY")
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_SSH_KEY_PATH = _REPO_ROOT / ".ssh_tunnel_test_keys" / "id_ed25519"
+
+SSH_KEY_PATH = os.environ.get(
+    "TARGET_CLICKHOUSE_SSH_TEST_KEY",
+    str(_DEFAULT_SSH_KEY_PATH),
+)
 BASTION_HOST = os.environ.get("TARGET_CLICKHOUSE_SSH_TEST_BASTION_HOST", "localhost")
 BASTION_PORT = int(os.environ.get("TARGET_CLICKHOUSE_SSH_TEST_BASTION_PORT", "2222"))
 BASTION_USER = os.environ.get("TARGET_CLICKHOUSE_SSH_TEST_BASTION_USER", "testuser")
 TUNNEL_TARGET_HOST = os.environ.get(
-    "TARGET_CLICKHOUSE_SSH_TEST_TARGET_HOST", "clickhouse-tunnel-target",
+    "TARGET_CLICKHOUSE_SSH_TEST_TARGET_HOST",
+    "clickhouse-tunnel-target",
 )
 
 pytestmark = pytest.mark.skipif(
     not SSH_KEY_PATH or not Path(SSH_KEY_PATH).exists(),
     reason=(
-        "Requires a real bastion + network-isolated ClickHouse -- set "
-        "TARGET_CLICKHOUSE_SSH_TEST_KEY to run (see module docstring for setup)."
+        "Requires a real bastion + network-isolated ClickHouse -- run "
+        "./gen_ssh_tunnel_test_key.sh && docker compose --profile ssh-tunnel "
+        "up -d to set up (see module docstring)."
     ),
 )
 
@@ -69,15 +69,13 @@ def _config() -> dict:
             "host": BASTION_HOST,
             "port": BASTION_PORT,
             "username": BASTION_USER,
-            "private_key": Path(SSH_KEY_PATH).read_text(),
+            "private_key": Path(SSH_KEY_PATH).read_text(),  # type:ignore[arg-type] # ty:ignore[invalid-argument-type]
         },
     }
 
 
 def test_target_host_is_unreachable_without_tunnel() -> None:
     """Sanity check: the isolation this test relies on is real, not assumed."""
-    import socket
-
     with pytest.raises(socket.gaierror):
         socket.gethostbyname(TUNNEL_TARGET_HOST)
 

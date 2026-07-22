@@ -98,8 +98,8 @@ Follow these instructions to contribute to this project.
 ### Initialize your Development Environment
 
 ```bash
-pipx install poetry
-poetry install
+curl -LsSf https://astral.sh/uv/install.sh | sh # https://docs.astral.sh/uv/getting-started/installation/
+uv sync
 ```
 
 ### Start the Clickhouse container
@@ -111,19 +111,41 @@ You can start the Clickhouse container by running:
 ./docker_run_clickhouse.sh
 ```
 
+Or, equivalently, with Docker Compose:
+```
+docker compose up -d
+```
+
+(The Arrow BATCH integration tests under `tests/arrow/` don't need this -- they use `testcontainers-python` to spin up their own ephemeral ClickHouse instance automatically.)
+
+#### Running the ssh_tunnel tests
+
+`tests/test_ssh_tunnel.py` needs a bastion + a ClickHouse instance that's only
+reachable through it. Set that up (once) with:
+```
+./gen_ssh_tunnel_test_key.sh
+docker compose --profile ssh-tunnel up -d
+```
+
+These tests are then no longer skipped. When tearing down, include the
+profile too (plain `docker compose down` won't stop these two services):
+```
+docker compose --profile ssh-tunnel down
+```
+
 ### Create and Run Tests
 
 Create tests within the `tests` subfolder and
   then run:
 
 ```bash
-poetry run pytest
+uv run pytest
 ```
 
 You can also test the `target-clickhouse` CLI interface directly using `poetry run`:
 
 ```bash
-poetry run target-clickhouse --help
+uv run target-clickhouse --help
 ```
 
 ### Testing with [Meltano](https://meltano.com/)

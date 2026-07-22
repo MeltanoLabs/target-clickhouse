@@ -5,27 +5,15 @@
 
 version: 2
 updates:
-  - package-ecosystem: "pip"
-    directory: "/"
+  - package-ecosystem: uv
+    directory: /
     schedule:
-      interval: "daily"
-      timezone: "America/New_York"
-      time: "09:00"
-    reviewers:
-      - "btheunissen"
-  - package-ecosystem: "pip"
-    directory: "/.github/workflows"
+      interval: monthly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: github-actions
+    directory: /
     schedule:
-      interval: "daily"
-      timezone: "America/New_York"
-      time: "09:00"
-    reviewers:
-      - "btheunissen"
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-      timezone: "America/New_York"
-      time: "09:00"
-    reviewers:
-      - "btheunissen"
+      interval: quarterly
+    cooldown:
+      default-days: 7

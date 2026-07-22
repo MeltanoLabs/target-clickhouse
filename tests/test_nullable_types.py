@@ -4,11 +4,15 @@ from clickhouse_sqlalchemy import types as clickhouse_sqlalchemy_types
 
 from target_clickhouse.connectors import ClickhouseConnector
 
+# ClickhouseConnector.__init__ does not open a DB connection (it only stores
+# config), so a real instance is cheap here -- needed since to_sql_type() now
+# reads self.config via the jsonschema_to_sql cached_property (for the
+# enable_json object-type override), which an unbound `self=None` call can't do.
+_CONNECTOR = ClickhouseConnector(config={})
+
 
 def _to_sql_type(jsonschema_type, is_primary_key=False):
-    """Call to_sql_type as an unbound method — avoids full connector init."""
-    return ClickhouseConnector.to_sql_type(
-        None,
+    return _CONNECTOR.to_sql_type(
         jsonschema_type,
         is_primary_key=is_primary_key,
     )

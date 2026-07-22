@@ -1,7 +1,7 @@
 import datetime
 import logging
 
-from singer_sdk.testing.suites import TestSuite
+from singer_sdk.testing.suites import SingerTestSuite
 from sqlalchemy import text
 
 from tests.conftest import TargetClickhouseFileTestTemplate
@@ -16,7 +16,7 @@ class TestDateTypeTargetClickhouse(TargetClickhouseFileTestTemplate):
 
     def validate(self) -> None:
         """Validate the data in the target."""
-        connector = self.target.default_sink_class.connector_class(self.target.config)
+        connector = self.target.default_sink_class.connector_class(self.target.config)  # ty:ignore[unresolved-attribute]
         records = {
             1: datetime.date(2024, 3, 15),
             2: datetime.date(2024, 3, 16),
@@ -24,9 +24,8 @@ class TestDateTypeTargetClickhouse(TargetClickhouseFileTestTemplate):
             4: None,
         }
 
-        result = connector.connection.execute(
-            statement=text("SELECT * FROM date_type"),
-        ).fetchall()
+        with connector._connect() as conn:  # noqa: SLF001
+            result = conn.execute(text("SELECT * FROM date_type")).fetchall()
 
         for record_id, expected_date in records.items():
             record = next((rec for rec in result if rec[0] == record_id), None)
@@ -36,7 +35,7 @@ class TestDateTypeTargetClickhouse(TargetClickhouseFileTestTemplate):
             ), f"For record {record_id}, expected {expected_date}, got {record[1]}"
 
 
-custom_target_test_suite = TestSuite(
+custom_target_test_suite = SingerTestSuite(
     kind="target",
     tests=[
         TestDateTypeTargetClickhouse,
