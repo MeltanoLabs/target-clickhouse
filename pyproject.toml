@@ -73,6 +73,7 @@ build-backend = "hatchling.build"
 
 [tool.ruff.lint]
 ignore = [
+    "CPY001", # Copyright notice
     "ANN001", # missing-return-type
     "ANN201",  # missing-return-type-doc
     "D100", # Missing docstring in public module
