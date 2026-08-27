@@ -548,7 +548,11 @@ class ClickhouseSink(SQLSink):
         record = pre_validate_for_string_type(record, self.schema, self.logger)
 
         try:
-            self._validator.validate(record)  # ty:ignore[unresolved-attribute]
+            # `_validator` is None when `validate_records` is set to False (see
+            # singer_sdk.sinks.core.RecordSinkBase.get_validator) -- skip validation
+            # in that case instead of crashing, matching the base class's own guard.
+            if self._validator is not None:
+                self._validator.validate(record)
             self._parse_timestamps_in_record(
                 record=record,
                 schema=self.schema,
