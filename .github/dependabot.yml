@@ -1,19 +1,46 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://help.github.com/github/administering-a-repository/configuration-options-for-dependency-updates
-
 version: 2
 updates:
-  - package-ecosystem: uv
-    directory: /
+  - package-ecosystem: "github-actions"
+    directory: "/"
     schedule:
-      interval: monthly
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     cooldown:
       default-days: 7
-  - package-ecosystem: github-actions
-    directory: /
+
+  - package-ecosystem: "pre-commit"
+    directory: "/"
     schedule:
-      interval: quarterly
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      pre-commit:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 7
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build"
+    groups:
+      python-runtime:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+      python-dev:
+        dependency-type: "development"
+        patterns:
+          - "*"
     cooldown:
       default-days: 7
