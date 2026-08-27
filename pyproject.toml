@@ -46,7 +46,7 @@ dev = [
     "types-simplejson>=3.19",
     "types-setuptools>=83",
     "pre-commit>=4",
-    "testcontainers[clickhouse]>=4.15.0rc4",
+    "testcontainers[clickhouse]>=4.15.0",
     "ty>=0.0.61",
     "mypy>=2.3.0",
 ]
