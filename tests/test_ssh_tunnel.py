@@ -69,7 +69,7 @@ def _config() -> dict:
             "host": BASTION_HOST,
             "port": BASTION_PORT,
             "username": BASTION_USER,
-            "private_key": Path(SSH_KEY_PATH).read_text(),  # type:ignore[arg-type] # ty:ignore[invalid-argument-type]
+            "private_key": Path(SSH_KEY_PATH).read_text(),  # type:ignore[arg-type]
         },
     }
 

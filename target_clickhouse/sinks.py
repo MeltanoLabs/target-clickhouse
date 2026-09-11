@@ -611,7 +611,7 @@ class ClickhouseSink(SQLSink):
                     date_val = handle_invalid_timestamp_in_record(
                         record,
                         [key],
-                        date_val,  # ty:ignore[invalid-argument-type]
+                        date_val,
                         datelike_type,
                         ex,
                         treatment,

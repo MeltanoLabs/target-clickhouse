@@ -12,6 +12,7 @@ from clickhouse_sqlalchemy import Table
 from clickhouse_sqlalchemy import (
     types as clickhouse_sqlalchemy_types,
 )
+from clickhouse_sqlalchemy.drivers import base as clickhouse_sqlalchemy_base
 from singer_sdk.sql import SQLConnector
 from sqlalchemy import Column, MetaData, create_engine, text
 from sqlalchemy.engine import URL
@@ -23,6 +24,18 @@ if TYPE_CHECKING:
     from clickhouse_driver.client import Client as ClickhouseDriverClient
     from singer_sdk.sql.connector import JSONSchemaToSQL
     from sqlalchemy.engine import Engine
+
+# clickhouse_sqlalchemy 0.3.2 predates ClickHouse's native `Time` column type and
+# has no entry for it in its reflection type map (`ischema_names`). Columns
+# created from a JSON Schema `format: time` property compile to DDL type `TIME`,
+# which recent ClickHouse servers accept and store as `Time`. Table creation
+# succeeds, but reflecting that column back on a later run trips
+# `SAWarning: Did not recognize type 'Time' of column '...'` and the column gets
+# treated as NullType. `ischema_names` is a single dict object shared (not
+# copied) by every driver's dialect class, so patching it here fixes reflection
+# everywhere.
+# https://github.com/xzkostyan/clickhouse-sqlalchemy/issues/390
+clickhouse_sqlalchemy_base.ischema_names.setdefault("Time", sqlalchemy.types.TIME)  # ty:ignore[no-matching-overload]
 
 
 class ClickHouseJSON(sqlalchemy.types.UserDefinedType):
