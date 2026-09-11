@@ -12,6 +12,7 @@ from clickhouse_sqlalchemy import Table
 from clickhouse_sqlalchemy import (
     types as clickhouse_sqlalchemy_types,
 )
+from clickhouse_sqlalchemy.drivers import base as clickhouse_sqlalchemy_base
 from singer_sdk.sql import SQLConnector
 from sqlalchemy import Column, MetaData, create_engine, text
 from sqlalchemy.engine import URL
@@ -23,6 +24,18 @@ if TYPE_CHECKING:
     from clickhouse_driver.client import Client as ClickhouseDriverClient
     from singer_sdk.sql.connector import JSONSchemaToSQL
     from sqlalchemy.engine import Engine
+
+# clickhouse_sqlalchemy 0.3.2 predates ClickHouse's native `Time` column type and
+# has no entry for it in its reflection type map (`ischema_names`). Columns
+# created from a JSON Schema `format: time` property compile to DDL type `TIME`,
+# which recent ClickHouse servers accept and store as `Time`. Table creation
+# succeeds, but reflecting that column back on a later run trips
+# `SAWarning: Did not recognize type 'Time' of column '...'` and the column gets
+# treated as NullType. `ischema_names` is a single dict object shared (not
+# copied) by every driver's dialect class, so patching it here fixes reflection
+# everywhere.
+# https://github.com/xzkostyan/clickhouse-sqlalchemy/issues/390
+clickhouse_sqlalchemy_base.ischema_names.setdefault("Time", sqlalchemy.types.TIME)  # ty:ignore[no-matching-overload]
 
 
 class ClickHouseJSON(sqlalchemy.types.UserDefinedType):
@@ -232,6 +245,11 @@ class ClickhouseConnector(SQLConnector):
         """
         to_sql = super().jsonschema_to_sql
         to_sql.register_format_handler("date", clickhouse_sqlalchemy_types.Date32)
+        # The SDK's default "time" -> TIME() mapping can't bind: neither driver
+        # can serialize a `datetime.time` (see ischema_names patch above). Store
+        # as a string instead (paired with `.isoformat()` in
+        # `ClickhouseSink._parse_timestamps_in_record`).
+        to_sql.register_format_handler("time", clickhouse_sqlalchemy_types.String)
         to_sql.register_type_handler("integer", clickhouse_sqlalchemy_types.Int64)
         # Clickhouse does not support the DECIMAL type without providing
         # precision, so plain "number" schemas use FLOAT instead.

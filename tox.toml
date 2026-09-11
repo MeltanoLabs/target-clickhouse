@@ -3,17 +3,25 @@ requires = [
     "tox-uv>=1.35",
 ]
 env_list = [
-    "3.10",
-    "3.11",
+    "lint",
+    { prefix = "3.", start = 10 },
+    "latest",
 ]
 
 [env_run_base]
+description = "run tests on Python {py_dot_ver}"
+runner = "uv-venv-runner"
 dependency_groups = [ "dev" ]
 commands = [
     ["pytest", { replace = "posargs", default = [ "tests" ], extend = true } ],
 ]
 
+[env.latest]
+description = "run tests with the latest Singer SDK"
+set_env = { "UV_OVERRIDE" = "overrides.txt", "UV_NO_SOURCES" = "1" }
+
 [env.lint]
+description = "lint and format"
 dependency_groups = [ "dev" ]
 commands = [
     [ "ruff", "check", "--fix" ],

@@ -1,0 +1,1 @@
+singer-sdk @ git+https://github.com/meltano/sdk.git@main

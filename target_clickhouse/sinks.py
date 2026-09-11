@@ -611,12 +611,15 @@ class ClickhouseSink(SQLSink):
                     date_val = handle_invalid_timestamp_in_record(
                         record,
                         [key],
-                        date_val,  # ty:ignore[invalid-argument-type]
+                        date_val,
                         datelike_type,
                         ex,
                         treatment,
                         self.logger,
                     )
+                if datelike_type == "time" and date_val is not None:
+                    # Column is a string (see jsonschema_to_sql), so reserialize.
+                    date_val = date_val.isoformat()
                 record[key] = date_val
 
 
