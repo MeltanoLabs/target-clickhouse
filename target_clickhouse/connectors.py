@@ -245,6 +245,11 @@ class ClickhouseConnector(SQLConnector):
         """
         to_sql = super().jsonschema_to_sql
         to_sql.register_format_handler("date", clickhouse_sqlalchemy_types.Date32)
+        # The SDK's default "time" -> TIME() mapping can't bind: neither driver
+        # can serialize a `datetime.time` (see ischema_names patch above). Store
+        # as a string instead (paired with `.isoformat()` in
+        # `ClickhouseSink._parse_timestamps_in_record`).
+        to_sql.register_format_handler("time", clickhouse_sqlalchemy_types.String)
         to_sql.register_type_handler("integer", clickhouse_sqlalchemy_types.Int64)
         # Clickhouse does not support the DECIMAL type without providing
         # precision, so plain "number" schemas use FLOAT instead.

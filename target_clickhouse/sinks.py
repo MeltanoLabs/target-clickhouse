@@ -617,6 +617,9 @@ class ClickhouseSink(SQLSink):
                         treatment,
                         self.logger,
                     )
+                if datelike_type == "time" and date_val is not None:
+                    # Column is a string (see jsonschema_to_sql), so reserialize.
+                    date_val = date_val.isoformat()
                 record[key] = date_val
 
 
