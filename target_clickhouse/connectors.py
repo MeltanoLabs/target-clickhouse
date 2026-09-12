@@ -203,12 +203,16 @@ class ClickhouseConnector(SQLConnector):
         ensure the database exists here first, bootstrapping against the
         always-present ``default`` database.
         """
-        self._ensure_database_exists()
+        self._ensure_database_exists(self.config.get("database"))
         return create_engine(self.get_sqlalchemy_url(self.config))
 
-    def _ensure_database_exists(self) -> None:
-        """Create the configured target database if it does not already exist."""
-        database = self.config.get("database")
+    def _ensure_database_exists(self, database: str | None) -> None:
+        """Create the given database if it does not already exist.
+
+        Args:
+            database: The database name to create, if not already present.
+
+        """
         # ``default`` always exists; nothing to create (and nothing to bootstrap
         # against if that is also the target).
         if not database or database == "default":
@@ -337,14 +341,13 @@ class ClickhouseConnector(SQLConnector):
 
         _ = partition_keys  # Not supported in generic implementation.
 
-        _, _, table_name = self.parse_full_table_name(full_table_name)
+        _, schema_name, table_name = self.parse_full_table_name(full_table_name)
 
         # If config table name is set, then use it instead of the table name.
         if self.config.get("table_name"):
             table_name = self.config.get("table_name")
 
-        # Do not set schema, as it is not supported by Clickhouse.
-        meta = MetaData(schema=None)
+        meta = MetaData()
 
         columns: list[Column] = []
         primary_keys = primary_keys or []
@@ -386,19 +389,31 @@ class ClickhouseConnector(SQLConnector):
         if self.config.get("cluster_name"):
             table_args["clickhouse_cluster"] = self.config.get("cluster_name")
 
-        _ = Table(table_name, meta, *columns, table_engine, **table_args)  # ty:ignore[invalid-argument-type]
+        _ = Table(  # ty:ignore[invalid-argument-type]
+            table_name,
+            meta,
+            *columns,
+            table_engine,
+            schema=schema_name,
+            **table_args,
+        )
         meta.create_all(self._engine)
 
-    def prepare_schema(self, _: str) -> None:  # ty:ignore[invalid-method-override]
+    def prepare_schema(self, schema_name: str) -> None:  # ty:ignore[invalid-method-override]
         """Create the target database schema.
 
-        In Clickhouse, a schema is a database, so this method is a no-op.
+        In ClickHouse, a schema (derived from a stream's ``<schema>-<table>``
+        name, or from ``default_target_schema``) is itself a database, distinct
+        from the connector's configured ``database``. Unlike that configured
+        database -- created once in ``create_engine``, since it must exist
+        before the engine can even bind to it -- a schema-derived database is
+        only known once a stream shows up, so it is created here instead.
 
         Args:
             schema_name: The target schema name.
 
         """
-        return
+        self._ensure_database_exists(schema_name)
 
     def prepare_column(
         self,
