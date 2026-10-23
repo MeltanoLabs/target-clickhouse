@@ -1,4 +1,4 @@
-import datetime
+import datetime as dt
 import logging
 
 from singer_sdk.testing.suites import SingerTestSuite
@@ -18,9 +18,9 @@ class TestDateTypeTargetClickhouse(TargetClickhouseFileTestTemplate):
         """Validate the data in the target."""
         connector = self.target.default_sink_class.connector_class(self.target.config)  # ty:ignore[unresolved-attribute]
         records = {
-            1: datetime.date(2024, 3, 15),
-            2: datetime.date(2024, 3, 16),
-            3: datetime.date(1920, 3, 16),
+            1: dt.date(2024, 3, 15),
+            2: dt.date(2024, 3, 16),
+            3: dt.date(1920, 3, 16),
             4: None,
         }
 

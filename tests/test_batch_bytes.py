@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 
 from target_clickhouse.sinks import ClickhouseSink
 from target_clickhouse.target import TargetClickhouse
@@ -90,5 +90,5 @@ def test_process_record_does_not_crash_on_unnormalized_date_values() -> None:
     """
     config = {**CONFIG, "batch_size_rows": 10_000, "max_batch_bytes": 1_000_000}
     sink = _make_sink(config)
-    sink.process_record({"id": 1, "when": datetime.date(2024, 3, 15)}, {})
+    sink.process_record({"id": 1, "when": dt.date(2024, 3, 15)}, {})
     assert sink._batch_bytes > 0  # noqa: SLF001
